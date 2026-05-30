@@ -1,0 +1,87 @@
+services:
+  # ── Single-node PulseDB (default) ─────────────────────────────────────────
+  pulsedb:
+    image: pulsedb/pulsedb:latest
+    build: .
+    ports:
+      - "7878:7878"
+    volumes:
+      # Named volume keeps data across container restarts.
+      # To use a host path instead: ./data:/var/lib/pulsedb
+      - pulsedb-data:/var/lib/pulsedb
+    environment:
+      # Tune log verbosity: trace | debug | info | warn | error
+      PULSEDB_LOG_LEVEL: info
+    command:
+      - pulsedb-server
+      - --addr
+      - "0.0.0.0:7878"
+      - --data-dir
+      - /var/lib/pulsedb
+      - --log-level
+      - "${PULSEDB_LOG_LEVEL:-info}"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "sh", "-c",
+             "echo '{\"query\":\"SHOW TABLES\"}' | nc -q1 127.0.0.1 7878 | grep -q status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # ── Three-node cluster example ────────────────────────────────────────────
+  # Uncomment to run a Raft cluster.  Nodes discover each other via CLUSTER JOIN.
+  #
+  # pulsedb-node1:
+  #   image: pulsedb/pulsedb:latest
+  #   build: .
+  #   ports:
+  #     - "7878:7878"
+  #     - "7879:7879"    # Raft replication port
+  #   volumes:
+  #     - pulsedb-node1:/var/lib/pulsedb
+  #   command:
+  #     - pulsedb-server
+  #     - --addr
+  #     - "0.0.0.0:7878"
+  #     - --data-dir
+  #     - /var/lib/pulsedb
+  #   restart: unless-stopped
+  #
+  # pulsedb-node2:
+  #   image: pulsedb/pulsedb:latest
+  #   build: .
+  #   ports:
+  #     - "7880:7878"
+  #     - "7881:7879"
+  #   volumes:
+  #     - pulsedb-node2:/var/lib/pulsedb
+  #   command:
+  #     - pulsedb-server
+  #     - --addr
+  #     - "0.0.0.0:7878"
+  #     - --data-dir
+  #     - /var/lib/pulsedb
+  #   restart: unless-stopped
+  #
+  # pulsedb-node3:
+  #   image: pulsedb/pulsedb:latest
+  #   build: .
+  #   ports:
+  #     - "7882:7878"
+  #     - "7883:7879"
+  #   volumes:
+  #     - pulsedb-node3:/var/lib/pulsedb
+  #   command:
+  #     - pulsedb-server
+  #     - --addr
+  #     - "0.0.0.0:7878"
+  #     - --data-dir
+  #     - /var/lib/pulsedb
+  #   restart: unless-stopped
+
+volumes:
+  pulsedb-data:
+  # pulsedb-node1:
+  # pulsedb-node2:
+  # pulsedb-node3:

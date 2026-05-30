@@ -1,0 +1,14 @@
+target/
+flowdb-data/
+*.wal
+*.snap
+*.msi
+docs/
+clients/
+benchmarks/
+.git/
+.github/
+*.md
+wix/
+FlowDB_Documentation.docx
+test_queries.ps1
