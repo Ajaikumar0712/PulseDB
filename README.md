@@ -2,9 +2,9 @@
 
 > **A high-performance database engine built in Rust with its own query language — PulseQL.**
 
-[![Version](https://img.shields.io/badge/version-0.2.0-blue)](https://github.com/Ajaikumar0712/Flow_DB)
+[![Version](https://img.shields.io/badge/version-0.2.0-blue)](https://github.com/Ajaikumar0712/PulseDB)
 [![License](https://img.shields.io/badge/license-BUSL--1.1-orange)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)](https://github.com/Ajaikumar0712/Flow_DB/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)](https://github.com/Ajaikumar0712/PulseDB/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange)](https://www.rust-lang.org)
 
 PulseDB is a self-contained, production-ready database engine that stores data in-memory with WAL-backed durability, communicates over TCP using JSON, and is queried with **PulseQL** — a purpose-built, SQL-inspired query language.
@@ -29,7 +29,10 @@ PulseDB is a self-contained, production-ready database engine that stores data i
 | **Clustering** | Peer heartbeats, Raft consensus, FNV-1a shard routing |
 | **REST API** | Auto-generated HTTP endpoint per table (`API GENERATE`) |
 | **Windows Service** | Runs as a background service that starts with Windows |
+| **Linux / systemd** | Prints a ready-to-use systemd unit file (`systemd-unit`) |
+| **Docker** | Official multi-stage image — single node or 3-node cluster |
 | **MSI Installer** | One-click install on Windows |
+| **Client SDKs** | Python, Go, and JavaScript clients included |
 
 ---
 
@@ -87,10 +90,16 @@ That's it — you're running PulseDB.
 1. [Installation](#installation)
    - [MSI Installer (Windows)](#option-a--msi-installer-windows)
    - [Build from Source](#option-b--build-from-source)
+   - [Docker](#option-c--docker)
 2. [Running the Server](#running-the-server)
 3. [Windows Service](#windows-service)
-4. [Connecting with the REPL](#connecting-with-the-repl)
-5. [PulseQL Language Reference](#pulseql-language-reference)
+4. [Linux Service (systemd)](#linux-service-systemd)
+5. [Connecting with the REPL](#connecting-with-the-repl)
+6. [Client SDKs](#client-sdks)
+   - [Python](#python)
+   - [Go](#go)
+   - [JavaScript](#javascript)
+7. [PulseQL Language Reference](#pulseql-language-reference)
    - [Data Types](#data-types)
    - [Table Management](#table-management)
    - [Writing Data](#writing-data)
@@ -104,15 +113,19 @@ That's it — you're running PulseDB.
    - [REST API](#rest-api)
    - [Security & User Management](#security--user-management)
    - [Cluster Commands](#cluster-commands)
+   - [Triggers](#triggers)
+   - [Graph Queries](#graph-queries)
+   - [Time Travel Queries](#time-travel-queries)
+   - [AI Search](#ai-search)
    - [Admin Commands](#admin-commands)
    - [Resource Configuration](#resource-configuration)
-6. [Expressions & Operators](#expressions--operators)
-7. [Response Format](#response-format)
-8. [Metrics](#metrics)
-9. [Architecture](#architecture)
-10. [Quick Reference Card](#quick-reference-card)
-11. [Troubleshooting](#troubleshooting)
-12. [License & Pricing](#license--pricing)
+8. [Expressions & Operators](#expressions--operators)
+9. [Response Format](#response-format)
+10. [Metrics](#metrics)
+11. [Architecture](#architecture)
+12. [Quick Reference Card](#quick-reference-card)
+13. [Troubleshooting](#troubleshooting)
+14. [License & Pricing](#license--pricing)
 
 ---
 
@@ -120,7 +133,7 @@ That's it — you're running PulseDB.
 
 ### Option A — MSI Installer (Windows)
 
-1. Download `pulsedb-0.2.0-x86_64.msi` from the [releases page](https://github.com/Ajaikumar0712/Flow_DB/releases)
+1. Download `pulsedb-0.2.0-x86_64.msi` from the [releases page](https://github.com/Ajaikumar0712/PulseDB/releases)
 2. Double-click and follow the installer wizard
 3. Accept the BUSL-1.1 license agreement
 4. Keep "Add to PATH" checked (recommended)
@@ -144,8 +157,8 @@ To uninstall: **Settings → Apps → PulseDB → Uninstall**
 **Requirements:** Rust 1.70 or newer — install from [rustup.rs](https://rustup.rs)
 
 ```powershell
-git clone https://github.com/Ajaikumar0712/Flow_DB
-cd Flow_DB
+git clone https://github.com/Ajaikumar0712/PulseDB
+cd PulseDB
 
 # Release build (optimised, recommended)
 cargo build --release
@@ -163,6 +176,28 @@ Output binaries:
 
 ---
 
+### Option C — Docker
+
+No Rust toolchain required. Works on Linux, macOS, and Windows with Docker Desktop.
+
+```bash
+# Pull and run
+docker compose up -d
+
+# Connect with the REPL
+docker run --rm -it --network host pulsedb/pulsedb pulsedb-repl
+```
+
+Data is persisted in a named Docker volume (`pulsedb-data`). To run a 3-node cluster, see the commented cluster section in `docker-compose.yml`.
+
+```bash
+# Build the image locally instead
+docker build -t pulsedb/pulsedb .
+docker run -p 7878:7878 -v pulsedb-data:/var/lib/pulsedb pulsedb/pulsedb
+```
+
+---
+
 ## Running the Server
 
 Start PulseDB in the foreground. Logs print to the terminal. Press `Ctrl+C` to stop.
@@ -175,11 +210,14 @@ Default address: `127.0.0.1:7878`
 
 ### Server Flags
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--addr <HOST:PORT>` | `127.0.0.1:7878` | Address and port to listen on |
-| `--wal <PATH>` | `pulsedb.wal` | Path to the Write-Ahead Log file |
-| `--log-level <LEVEL>` | `info` | Verbosity: `trace`, `debug`, `info`, `warn`, `error` |
+| Flag | Short | Default | Description |
+| --- | --- | --- | --- |
+| `--addr <HOST:PORT>` | `-a` | `127.0.0.1:7878` | Address and port to listen on |
+| `--wal <PATH>` | `-w` | `pulsedb.wal` | Path to the Write-Ahead Log file |
+| `--data-dir <PATH>` | `-d` | `pulsedb-data` | Directory for catalog and disk snapshots |
+| `--log-level <LEVEL>` | `-l` | `info` | Verbosity: `trace`, `debug`, `info`, `warn`, `error` |
+| `--mode <MODE>` | | `memory` | Storage mode: `memory` or `disk` |
+| `--row-cache <N>` | | `500000` | Per-table in-memory row limit before disk eviction (disk mode only) |
 
 **Examples:**
 
@@ -187,14 +225,17 @@ Default address: `127.0.0.1:7878`
 # Listen on all network interfaces
 pulsedb-server --addr 0.0.0.0:7878
 
-# Custom WAL file location
-pulsedb-server --wal C:\data\pulsedb.wal
+# Custom WAL file and data directory
+pulsedb-server --wal C:\data\pulsedb.wal --data-dir C:\data\pulsedb
+
+# Enable disk mode with 100k row cache per table
+pulsedb-server --mode disk --row-cache 100000
 
 # Debug logging
 pulsedb-server --log-level debug
 
 # All flags combined
-pulsedb-server --addr 0.0.0.0:7878 --wal C:\data\pulsedb.wal --log-level info
+pulsedb-server --addr 0.0.0.0:7878 --wal C:\data\pulsedb.wal --data-dir C:\data\pulsedb --mode disk --log-level info
 ```
 
 ---
@@ -247,6 +288,29 @@ pulsedb-server --addr 0.0.0.0:7878 --wal C:\data\pulsedb.wal install
 
 ---
 
+## Linux Service (systemd)
+
+On Linux (and macOS), PulseDB can run as a systemd service. Use `systemd-unit` to print a ready-to-use unit file, then install it:
+
+```bash
+# Print the unit file
+pulsedb-server --addr 0.0.0.0:7878 --data-dir /var/lib/pulsedb systemd-unit
+
+# Install it (requires root)
+pulsedb-server --addr 0.0.0.0:7878 --data-dir /var/lib/pulsedb systemd-unit \
+  | sudo tee /etc/systemd/system/pulsedb.service
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now pulsedb
+
+# Connect from anywhere
+pulsedb-repl --addr 127.0.0.1:7878
+```
+
+The generated unit file runs the server as a `pulsedb` system user with `Restart=on-failure`.
+
+---
+
 ## Connecting with the REPL
 
 `pulsedb-repl` is the interactive command-line client.
@@ -267,6 +331,165 @@ At the `pulseql>` prompt, type any PulseQL statement and press Enter to execute 
 | `help` or `\help` | Show help |
 | `exit`, `quit`, or `\q` | Disconnect and exit |
 | `Ctrl+C` / `Ctrl+D` | Disconnect and exit |
+
+---
+
+## Client SDKs
+
+Official client libraries are in the `clients/` directory. Each wraps the TCP + JSON protocol and exposes a native API for its language.
+
+---
+
+### Python
+
+**Requirements:** Python 3.8+, no extra dependencies.
+
+```bash
+pip install clients/python
+```
+
+```python
+from pulsedb import PulseDB, PulseDBError
+
+with PulseDB.connect("127.0.0.1", 7878) as db:
+    db.auth("alice", "secret123")
+
+    db.query("MAKE TABLE users (id int PRIMARY KEY, name text, age int)")
+    db.query('PUT users { id: 1, name: "Alice", age: 30 }')
+    db.query('PUT users { id: 2, name: "Bob",   age: 25 }')
+
+    result = db.query("GET users WHERE age >= 28")
+    for row in result:
+        print(row.id, row.name, row.age)
+        # or: print(row.as_dict())
+
+    # Single row
+    first = db.query("GET users LIMIT 1").rows[0]
+    print(first["name"])
+```
+
+**API:**
+
+| Method | Description |
+| --- | --- |
+| `PulseDB.connect(host, port)` | Open a connection (class method) |
+| `db.auth(username, password)` | Authenticate the session |
+| `db.query(q)` | Execute any PulseQL string; returns `Result` |
+| `db.close()` | Close the connection |
+| `result.rows` | List of `Row` objects |
+| `result.columns` | List of column names |
+| `row["col"]` / `row.col` | Access a column value by name |
+| `row.as_dict()` | Row as a plain dict |
+
+---
+
+### Go
+
+**Requirements:** Go 1.18+.
+
+```bash
+go get github.com/Ajaikumar0712/PulseDB/clients/go
+```
+
+```go
+package main
+
+import (
+    "fmt"
+    pulsedb "github.com/Ajaikumar0712/PulseDB/clients/go"
+)
+
+func main() {
+    c, err := pulsedb.Connect("127.0.0.1:7878")
+    if err != nil {
+        panic(err)
+    }
+    defer c.Close()
+
+    c.Auth("alice", "secret123")
+
+    c.Query(`MAKE TABLE users (id int PRIMARY KEY, name text, age int)`)
+    c.Query(`PUT users { id: 1, name: "Alice", age: 30 }`)
+
+    result, err := c.Query("GET users WHERE age >= 28")
+    if err != nil {
+        panic(err)
+    }
+    for _, row := range result.Rows {
+        fmt.Println(row.Get("id"), row.Get("name"))
+        // or: row.Fields() → map[string]interface{}
+    }
+}
+```
+
+**API:**
+
+| Function / Method | Description |
+| --- | --- |
+| `pulsedb.Connect(addr)` | Dial TCP; returns `*Client` |
+| `c.Auth(username, password)` | Authenticate the session |
+| `c.Query(q)` | Execute any PulseQL string; returns `*Result` |
+| `c.Close()` | Close the connection |
+| `result.Rows` | `[]*Row` |
+| `row.Get("col")` | Column value by name |
+| `row.Fields()` | Row as `map[string]interface{}` |
+
+The `Client` is thread-safe — a single connection can be shared across goroutines.
+
+---
+
+### JavaScript
+
+**Requirements:** Node.js 14+, no npm dependencies.
+
+```bash
+# Copy or symlink clients/javascript/index.js into your project
+```
+
+```js
+const { PulseDB } = require('./clients/javascript');
+
+async function main() {
+    const db = await PulseDB.connect({ host: '127.0.0.1', port: 7878 });
+
+    await db.auth('alice', 'secret123');
+
+    await db.query(`MAKE TABLE users (id int PRIMARY KEY, name text, age int)`);
+    await db.query(`PUT users { id: 1, name: "Alice", age: 30 }`);
+
+    const result = await db.query('GET users WHERE age >= 28');
+    for (const row of result) {
+        console.log(row.id, row.name);   // direct property access
+        console.log(row.toObject());     // plain object
+    }
+
+    db.close();
+}
+
+main();
+```
+
+**One-shot helper:**
+
+```js
+const result = await PulseDB.withConnection(
+    async (db) => db.query('GET users LIMIT 10'),
+    { host: '127.0.0.1', port: 7878 }
+);
+```
+
+**API:**
+
+| Method | Description |
+| --- | --- |
+| `PulseDB.connect(opts)` | Open connection; returns `Promise<PulseDB>` |
+| `PulseDB.withConnection(fn, opts)` | Auto-closing one-shot helper |
+| `db.auth(username, password)` | Authenticate the session |
+| `db.query(q)` | Execute PulseQL; returns `Promise<Result>` |
+| `db.close()` | Destroy the socket |
+| `result.rows` | Array of `Row` objects |
+| `row.<colName>` | Direct property access |
+| `row.toObject()` | Row as a plain object |
 
 ---
 
@@ -695,34 +918,64 @@ PulseDB uses **MVCC (Multi-Version Concurrency Control)** — readers never bloc
 
 PulseDB can expose any table as an HTTP REST endpoint — useful for integrating with tools or services that speak HTTP instead of PulseQL.
 
-#### API GENERATE — Create an HTTP endpoint for a table
+#### API GENERATE — Create HTTP endpoints for a table
 
 ```
-API GENERATE <table>
+API GENERATE FOR <table>
 ```
 
 ```sql
-API GENERATE users
+API GENERATE FOR users
 ```
 
-This starts an HTTP server on a local port and logs the address. The endpoint supports:
+This starts an HTTP server on an auto-assigned port (starting at 7879) and logs the address. Five endpoints are created per table:
 
-| HTTP Method | Action |
-|-------------|--------|
-| `GET /` | Fetch all rows (equivalent to `GET <table>`) |
-| `POST /` | Insert a row (request body: JSON object) |
+| Method | Path | Action |
+| --- | --- | --- |
+| `GET` | `/api/<table>` | Fetch all rows |
+| `POST` | `/api/<table>` | Insert a row (body: JSON object) |
+| `GET` | `/api/<table>/<id>` | Fetch a single row by UUID |
+| `PUT` | `/api/<table>/<id>` | Update row fields (body: partial JSON) |
+| `DELETE` | `/api/<table>/<id>` | Delete a row |
+
+> Nested objects are not supported in POST/PUT request bodies.
 
 **Example (PowerShell):**
 
 ```powershell
 # Read all rows
-Invoke-RestMethod -Uri "http://127.0.0.1:<port>/" -Method GET
+Invoke-RestMethod -Uri "http://127.0.0.1:7879/api/users" -Method GET
 
 # Insert a row
-Invoke-RestMethod -Uri "http://127.0.0.1:<port>/" -Method POST `
+Invoke-RestMethod -Uri "http://127.0.0.1:7879/api/users" -Method POST `
     -ContentType "application/json" `
     -Body '{"id":99,"name":"REST User","age":22}'
+
+# Fetch by ID
+Invoke-RestMethod -Uri "http://127.0.0.1:7879/api/users/<uuid>" -Method GET
+
+# Update fields
+Invoke-RestMethod -Uri "http://127.0.0.1:7879/api/users/<uuid>" -Method PUT `
+    -ContentType "application/json" `
+    -Body '{"age":23}'
+
+# Delete
+Invoke-RestMethod -Uri "http://127.0.0.1:7879/api/users/<uuid>" -Method DELETE
 ```
+
+#### API STOP — Shut down an endpoint
+
+```sql
+API STOP FOR users
+```
+
+#### SHOW APIS — List active endpoints
+
+```sql
+SHOW APIS
+```
+
+Returns each active table alongside its port number.
 
 ---
 
@@ -838,6 +1091,113 @@ CLUSTER SHARD STATUS
 ```sql
 CLUSTER SHARD DROP orders
 ```
+
+---
+
+### Triggers
+
+Triggers fire a PulseQL query automatically whenever a specific mutation event occurs on a table.
+
+#### TRIGGER — Create a trigger
+
+```
+TRIGGER <name> WHEN PUT|SET|DEL <table> DO <query>
+```
+
+```sql
+-- Log every new user insert into an audit table
+TRIGGER log_new_user WHEN PUT users DO PUT audit { action: "user_inserted" }
+
+-- Clear a cache table whenever orders are updated
+TRIGGER bust_cache WHEN SET orders DO DEL order_cache
+```
+
+#### DROP TRIGGER — Remove a trigger
+
+```sql
+DROP TRIGGER log_new_user
+```
+
+#### SHOW TRIGGERS — List all triggers
+
+```sql
+SHOW TRIGGERS
+```
+
+---
+
+### Graph Queries
+
+`GRAPH MATCH` traverses a node–edge–node relationship across three tables in a single query.
+
+```
+GRAPH MATCH (src_alias:src_table) -[edge_alias:edge_table]-> (dst_alias:dst_table)
+    [WHERE <condition>]
+    [LIMIT <n>]
+```
+
+The edge table must have `from_id` and `to_id` columns pointing to the primary keys of the source and destination tables. Result columns are prefixed with their alias (e.g. `a.name`, `rel.weight`, `b.id`).
+
+**Setup:**
+
+```sql
+MAKE TABLE people   (id int PRIMARY KEY, name text)
+MAKE TABLE follows  (id int PRIMARY KEY, from_id int, to_id int, since text)
+
+PUT people  { id: 1, name: "Alice" }
+PUT people  { id: 2, name: "Bob" }
+PUT follows { id: 10, from_id: 1, to_id: 2, since: "2024-01" }
+```
+
+**Query:**
+
+```sql
+GRAPH MATCH (a:people) -[rel:follows]-> (b:people)
+    WHERE a.name = "Alice"
+    LIMIT 10
+```
+
+---
+
+### Time Travel Queries
+
+Retrieve historical snapshots of data by timestamp or WAL version number.
+
+#### AS OF — Query data at a point in time
+
+```
+GET <table> AS OF "<timestamp>" [WHERE <condition>] [ORDER BY <col>] [LIMIT <n>]
+```
+
+```sql
+GET orders AS OF "2024-06-01T00:00:00Z" WHERE country = "US"
+```
+
+#### VERSION — Query data at a specific WAL version
+
+```
+GET <table> VERSION <n> [WHERE <condition>] [ORDER BY <col>] [LIMIT <n>]
+```
+
+```sql
+GET users VERSION 42
+```
+
+---
+
+### AI Search
+
+`AI SEARCH` performs semantic text search over a table using built-in 128-dimensional FNV-1a embeddings.
+
+```
+AI SEARCH <table> "<query>" [LIMIT <n>]
+```
+
+```sql
+AI SEARCH products "noise cancelling headphones" LIMIT 5
+```
+
+Results are ranked by embedding similarity. For higher-quality semantic search, store your own model-generated vectors in a `vector` column and use `SIMILAR` instead.
 
 ---
 
@@ -1108,6 +1468,14 @@ pulsedb-server
   │   ├── mod.rs         — ClusterRegistry: join/part/status/heartbeat tracking
   │   ├── raft.rs        — Raft consensus: leader election + log replication
   │   └── shard.rs       — ShardManager: FNV-1a hash routing
+  ├── triggers/
+  │   └── mod.rs         — TriggerStore: create/drop/match event-fired queries
+  ├── api/
+  │   └── mod.rs         — ApiStore: auto-generated HTTP/1.1 REST endpoints
+  ├── ai/
+  │   └── mod.rs         — FNV-1a text embeddings for AI SEARCH
+  ├── graph/
+  │   └── mod.rs         — GRAPH MATCH: 3-way node-edge-node traversal
   ├── storage/
   │   ├── table.rs       — In-memory table store, B-tree indexes, histograms
   │   ├── columnar.rs    — Dictionary / RLE / bitmap column compression
@@ -1196,8 +1564,25 @@ GET users RIGHT JOIN orders ON users.id = orders.user_id LIMIT 20
 GET orders GROUP BY country COUNT(*) AS cnt SUM(total) AS revenue
 GET orders GROUP BY user_id AVG(total) AS avg ORDER BY avg DESC
 
+-- ── Time travel ──────────────────────────────────────────────────────
+GET t AS OF "2024-06-01T00:00:00Z"
+GET t VERSION 42
+
+-- ── Triggers ──────────────────────────────────────────────────────────
+TRIGGER log_insert WHEN PUT t DO PUT audit { action: "insert" }
+DROP TRIGGER log_insert
+SHOW TRIGGERS
+
+-- ── Graph queries ─────────────────────────────────────────────────────
+GRAPH MATCH (a:people) -[rel:follows]-> (b:people) WHERE a.name = "Alice" LIMIT 10
+
+-- ── AI search ─────────────────────────────────────────────────────────
+AI SEARCH t "search phrase" LIMIT 5
+
 -- ── REST API ──────────────────────────────────────────────────────────
-API GENERATE users
+API GENERATE FOR users
+API STOP FOR users
+SHOW APIS
 
 -- ── Security ──────────────────────────────────────────────────────────
 AUTH alice 'secret123'
