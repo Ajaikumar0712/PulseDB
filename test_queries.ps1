@@ -1,8 +1,8 @@
 #!/usr/bin/env pwsh
 # ─────────────────────────────────────────────────────────────────
-#  FlowDB – interactive query test runner
+#  PulseDB – interactive query test runner
 #  Usage:  .\test_queries.ps1
-#  Requires: flowdb-server running on 127.0.0.1:7878
+#  Requires: pulsedb-server running on 127.0.0.1:7878
 # ─────────────────────────────────────────────────────────────────
 
 $server = "127.0.0.1"
@@ -45,7 +45,7 @@ function Run-Test {
 }
 
 Write-Host "═══════════════════════════════════════════════" -ForegroundColor Yellow
-Write-Host "  FlowDB – Query Test Runner" -ForegroundColor Yellow
+Write-Host "  PulseDB – Query Test Runner" -ForegroundColor Yellow
 Write-Host "  Server: ${server}:${port}" -ForegroundColor Yellow
 Write-Host "═══════════════════════════════════════════════" -ForegroundColor Yellow
 
@@ -272,5 +272,5 @@ Run-Test "SHOW APIS (empty)"      "SHOW APIS"
 Write-Host ""
 Write-Host "═══════════════════════════════════════════════" -ForegroundColor Yellow
 Write-Host "  Done. Connect interactively with:" -ForegroundColor Yellow
-Write-Host "  .\target\release\flowdb-repl.exe" -ForegroundColor Cyan
+Write-Host "  .\target\release\pulsedb-repl.exe" -ForegroundColor Cyan
 Write-Host "═══════════════════════════════════════════════" -ForegroundColor Yellow

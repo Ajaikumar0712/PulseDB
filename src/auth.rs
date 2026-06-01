@@ -89,9 +89,9 @@ impl User {
         }
     }
 
-    /// Verify a plain-text password against the stored hash.
+    /// Verify a plain-text password against the stored Argon2 PHC hash.
     pub fn verify_password(&self, password: &str) -> bool {
-        self.password_hash == hash_password(&self.salt, password)
+        verify_argon2(&self.password_hash, password)
     }
 
     /// Check whether this user can perform `op` on `table`.
@@ -274,14 +274,32 @@ fn generate_salt() -> String {
     uuid::Uuid::new_v4().to_string().replace('-', "")
 }
 
-/// Compute SHA-256(salt + ":" + password), returned as a lowercase hex string.
-fn hash_password(salt: &str, password: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(salt.as_bytes());
-    h.update(b":");
-    h.update(password.as_bytes());
-    h.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+/// Hash a password with Argon2id (memory-hard, GPU-resistant).
+/// The salt is embedded in the returned PHC string — `verify_password` uses it directly.
+fn hash_password(_salt: &str, password: &str) -> String {
+    use argon2::{
+        password_hash::{PasswordHasher, SaltString},
+        Argon2,
+    };
+    use rand_core::OsRng;
+    let salt = SaltString::generate(&mut OsRng);
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .expect("argon2 hash failed")
+        .to_string()
+}
+
+/// Verify a plain-text password against an Argon2 PHC string.
+pub(crate) fn verify_argon2(hash: &str, password: &str) -> bool {
+    use argon2::{
+        password_hash::{PasswordHash, PasswordVerifier},
+        Argon2,
+    };
+    let parsed = match PasswordHash::new(hash) {
+        Ok(h) => h,
+        Err(_) => return false,
+    };
+    Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────

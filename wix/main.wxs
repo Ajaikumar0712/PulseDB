@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='windows-1252'?>
 <!--
-  FlowDB v0.2.0 WiX Installer Definition
-  Product:    FlowDB - FlowQL Database Engine
+  PulseDB v0.2.0 WiX Installer Definition
+  Product:    PulseDB - PulseQL Database Engine
   Licensor:   Ajaikumar, ForNexus (https://fornexus.tech)
   License:    Business Source License 1.1  (BUSL-1.1)
   Built with: cargo wix
@@ -17,7 +17,7 @@
 
     <Product
         Id='*'
-        Name='FlowDB'
+        Name='PulseDB'
         UpgradeCode='E8CAA965-1AFD-41BC-B2EA-64F8731196C6'
         Manufacturer='Ajaikumar, ForNexus'
         Language='1033'
@@ -26,7 +26,7 @@
 
         <Package Id='*'
             Keywords='Installer'
-            Description='FlowDB v0.2.0 - High-performance database engine with FlowQL query language'
+            Description='PulseDB v0.2.0 - High-performance database engine with PulseQL query language'
             Manufacturer='Ajaikumar, ForNexus'
             InstallerVersion='450'
             Languages='1033'
@@ -40,16 +40,16 @@
             DowngradeErrorMessage='A newer version of [ProductName] is already installed. Setup will now exit.'/>
 
         <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1'/>
-        <Property Id='DiskPrompt' Value='FlowDB Installation'/>
+        <Property Id='DiskPrompt' Value='PulseDB Installation'/>
 
         <Property Id='ARPHELPLINK' Value='https://fornexus.tech'/>
         <Property Id='ARPURLINFOABOUT' Value='https://fornexus.tech'/>
-        <Property Id='ARPCONTACT' Value='flowdb.license@gmail.com'/>
-        <Property Id='ARPCOMMENTS' Value='FlowDB is a high-performance embedded database engine with the FlowQL query language. Free 30-day production trial. Commercial licenses from $500/yr.'/>
+        <Property Id='ARPCONTACT' Value='pulsedb.license@gmail.com'/>
+        <Property Id='ARPCOMMENTS' Value='PulseDB is a high-performance embedded database engine with the PulseQL query language. Free 30-day production trial. Commercial licenses from $500/yr.'/>
 
         <Directory Id='TARGETDIR' Name='SourceDir'>
             <Directory Id='$(var.PlatformProgramFilesFolder)' Name='PFiles'>
-                <Directory Id='APPLICATIONFOLDER' Name='FlowDB'>
+                <Directory Id='APPLICATIONFOLDER' Name='PulseDB'>
 
                     <Component Id='License' Guid='B3F2A981-44DC-4E2B-9C3D-7A1B6E5F0D82'>
                         <File Id='LicenseFile'
@@ -61,9 +61,9 @@
 
                     <Component Id='Documentation' Guid='C4E3B092-55ED-4F3C-AD4E-8B2C7F6A1E93'>
                         <File Id='DocFile'
-                              Name='FlowDB_Documentation.docx'
+                              Name='PulseDB_Documentation.docx'
                               DiskId='1'
-                              Source='FlowDB_Documentation.docx'
+                              Source='PulseDB_Documentation.docx'
                               KeyPath='yes'/>
                     </Component>
 
@@ -81,17 +81,17 @@
                         <Component Id='binary0' Guid='*'>
                             <File
                                 Id='exe0'
-                                Name='flowdb-repl.exe'
+                                Name='pulsedb-repl.exe'
                                 DiskId='1'
-                                Source='$(var.CargoTargetBinDir)\flowdb-repl.exe'
+                                Source='$(var.CargoTargetBinDir)\pulsedb-repl.exe'
                                 KeyPath='yes'/>
                         </Component>
                         <Component Id='binary1' Guid='*'>
                             <File
                                 Id='exe1'
-                                Name='flowdb-server.exe'
+                                Name='pulsedb-server.exe'
                                 DiskId='1'
-                                Source='$(var.CargoTargetBinDir)\flowdb-server.exe'
+                                Source='$(var.CargoTargetBinDir)\pulsedb-server.exe'
                                 KeyPath='yes'/>
                         </Component>
                     </Directory>
@@ -101,8 +101,8 @@
 
         <Feature
             Id='Binaries'
-            Title='FlowDB Application'
-            Description='Installs the FlowDB server, REPL, license, and documentation.'
+            Title='PulseDB Application'
+            Description='Installs the PulseDB server, REPL, license, and documentation.'
             Level='1'
             ConfigurableDirectory='APPLICATIONFOLDER'
             AllowAdvertise='no'
@@ -117,7 +117,7 @@
             <Feature
                 Id='Environment'
                 Title='Add to PATH'
-                Description='Add the FlowDB install folder to the PATH environment variable so flowdb-server and flowdb-repl can be called from any terminal.'
+                Description='Add the PulseDB install folder to the PATH environment variable so pulsedb-server and pulsedb-repl can be called from any terminal.'
                 Level='1'
                 Absent='allow'>
                 <ComponentRef Id='Path'/>

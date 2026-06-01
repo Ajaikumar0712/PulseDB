@@ -1,15 +1,15 @@
 //! PulseDB — interactive REPL (Read-Eval-Print Loop).
 //!
-//! Connects to a running PulseDB server via TCP and provides
-//! an interactive prompt for entering PulseQL queries.
+//! Connects to a running PulseDB server via TCP (or TLS with --tls) and
+//! provides an interactive prompt for entering PulseQL queries.
 //!
 //! This binary is a pure TCP client — it does NOT import any server-side
 //! modules. All processing happens on the server; this binary only handles
 //! I/O and display.
 
 use std::io::{self, BufRead, BufReader, Write};
-use std::net::TcpStream;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpStream};
+use std::sync::Arc;
 
 use clap::Parser as ClapParser;
 use serde_json::Value;
@@ -20,20 +20,92 @@ struct Cli {
     /// Server address to connect to
     #[arg(short, long, default_value = "127.0.0.1:7878")]
     addr: SocketAddr,
+
+    /// Connect with TLS encryption (server must also be started with --tls-cert/--tls-key)
+    #[arg(long)]
+    tls: bool,
+
+    /// Skip TLS certificate verification — use only with self-signed certs in development
+    #[arg(long)]
+    tls_no_verify: bool,
 }
 
 fn main() {
     let cli = Cli::parse();
 
-    let stream = TcpStream::connect(cli.addr).unwrap_or_else(|e| {
+    let tcp = TcpStream::connect(cli.addr).unwrap_or_else(|e| {
         eprintln!("Cannot connect to PulseDB server at {}: {e}", cli.addr);
         eprintln!("Start the server with: pulsedb-server");
         std::process::exit(1);
     });
 
-    let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
-    let mut writer = stream;
+    // If --tls, wrap the TCP stream with rustls.
+    // StreamOwned is not Clone, so we use a single shared reference for both
+    // reads and writes by wrapping in a RefCell-free approach via split_io.
+    if cli.tls {
+        let tls_stream = connect_tls(tcp, &cli).unwrap_or_else(|e| {
+            eprintln!("TLS handshake failed: {e}");
+            std::process::exit(1);
+        });
+        // Use a single BufReader that wraps the stream; writes go through a
+        // raw pointer to avoid double-borrow (the stream is single-threaded here).
+        run_repl_single(tls_stream);
+        return;
+    }
 
+    let mut reader = BufReader::new(tcp.try_clone().expect("clone stream"));
+    let mut writer = tcp;
+
+    run_repl(&mut reader, &mut writer);
+}
+
+/// REPL loop for a stream that can't be cloned (e.g. TLS).
+/// Reads and writes are interleaved — one query sent, one response received.
+fn run_repl_single<S: io::Read + io::Write>(stream: S) {
+    let mut stream = BufReader::new(stream);
+
+    // Read welcome banner
+    let mut banner = String::new();
+    stream.read_line(&mut banner).ok();
+    print_response(&banner);
+
+    let stdin = io::stdin();
+    let mut input_buf = String::new();
+
+    loop {
+        print!("pulseql> ");
+        io::stdout().flush().ok();
+        input_buf.clear();
+        match stdin.lock().read_line(&mut input_buf) {
+            Ok(0) => { println!("\nBye!"); break; }
+            Err(e) => { eprintln!("read error: {e}"); break; }
+            Ok(_) => {}
+        }
+        let line = input_buf.trim();
+        if line.is_empty() { continue; }
+        if line.eq_ignore_ascii_case("exit") || line.eq_ignore_ascii_case("quit") || line.eq_ignore_ascii_case("\\q") {
+            println!("Bye!"); break;
+        }
+        if line.eq_ignore_ascii_case("\\help") || line.eq_ignore_ascii_case("help") {
+            print_help(); continue;
+        }
+        if let Err(e) = stream.get_mut().write_all(format!("{line}\n").as_bytes()) {
+            eprintln!("send error: {e}"); break;
+        }
+        if let Err(e) = stream.get_mut().flush() {
+            eprintln!("flush error: {e}"); break;
+        }
+        let mut resp = String::new();
+        match stream.read_line(&mut resp) {
+            Ok(0) => { eprintln!("server closed connection"); break; }
+            Err(e) => { eprintln!("receive error: {e}"); break; }
+            Ok(_) => {}
+        }
+        print_response(&resp);
+    }
+}
+
+fn run_repl<R: BufRead, W: Write>(reader: &mut R, writer: &mut W) {
     // Read and print welcome banner
     let mut banner = String::new();
     reader.read_line(&mut banner).ok();
@@ -43,57 +115,114 @@ fn main() {
     let mut input_buf = String::new();
 
     loop {
-        // Prompt
         print!("pulseql> ");
         io::stdout().flush().ok();
 
         input_buf.clear();
         match stdin.lock().read_line(&mut input_buf) {
-            Ok(0) => {
-                println!("\nBye!");
-                break;
-            }
-            Err(e) => {
-                eprintln!("read error: {e}");
-                break;
-            }
+            Ok(0) => { println!("\nBye!"); break; }
+            Err(e) => { eprintln!("read error: {e}"); break; }
             Ok(_) => {}
         }
 
         let line = input_buf.trim();
-        if line.is_empty() {
-            continue;
-        }
+        if line.is_empty() { continue; }
         if line.eq_ignore_ascii_case("exit") || line.eq_ignore_ascii_case("quit") || line.eq_ignore_ascii_case("\\q") {
-            println!("Bye!");
-            break;
+            println!("Bye!"); break;
         }
         if line.eq_ignore_ascii_case("\\help") || line.eq_ignore_ascii_case("help") {
-            print_help();
-            continue;
+            print_help(); continue;
         }
 
-        // Send query to server
-        let msg = format!("{line}\n");
-        if let Err(e) = writer.write_all(msg.as_bytes()) {
-            eprintln!("send error: {e}");
-            break;
+        if let Err(e) = writer.write_all(format!("{line}\n").as_bytes()) {
+            eprintln!("send error: {e}"); break;
         }
 
-        // Read response
         let mut resp_line = String::new();
         match reader.read_line(&mut resp_line) {
-            Ok(0) => {
-                eprintln!("server closed connection");
-                break;
-            }
-            Err(e) => {
-                eprintln!("receive error: {e}");
-                break;
-            }
+            Ok(0) => { eprintln!("server closed connection"); break; }
+            Err(e) => { eprintln!("receive error: {e}"); break; }
             Ok(_) => {}
         }
         print_response(&resp_line);
+    }
+}
+
+/// Wrap a plain TcpStream with a rustls TLS client connection.
+/// Returns a `rustls::StreamOwned` which implements Read + Write.
+fn connect_tls(
+    tcp: TcpStream,
+    cli: &Cli,
+) -> Result<rustls::StreamOwned<rustls::ClientConnection, TcpStream>, String> {
+    use rustls::ClientConfig;
+
+    let host = cli.addr.ip().to_string();
+    let server_name = rustls::pki_types::ServerName::try_from(host.as_str())
+        .map(|n| n.to_owned())
+        .map_err(|_| format!("invalid server name: {host}"))?;
+
+    let config = if cli.tls_no_verify {
+        // Development only — skips certificate verification
+        ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoVerifier))
+            .with_no_client_auth()
+    } else {
+        // Production — verifies certificate against system roots
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(
+            webpki_roots::TLS_SERVER_ROOTS
+                .iter()
+                .cloned()
+        );
+        ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth()
+    };
+
+    let conn = rustls::ClientConnection::new(Arc::new(config), server_name)
+        .map_err(|e| e.to_string())?;
+    Ok(rustls::StreamOwned::new(conn, tcp))
+}
+
+/// Certificate verifier that accepts any certificate (dev/self-signed only).
+#[derive(Debug)]
+struct NoVerifier;
+
+impl rustls::client::danger::ServerCertVerifier for NoVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 

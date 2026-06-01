@@ -86,7 +86,8 @@ pub struct Executor {
     /// Cluster peer registry (None in single-node mode).
     pub cluster_registry: Option<Arc<ClusterRegistry>>,
     /// Authentication manager (None = open/unauthenticated mode).
-    pub auth_manager: Option<Arc<Mutex<AuthManager>>>,
+    /// Arc-shared across all connections; AuthManager is thread-safe via RwLock.
+    pub auth_manager: Option<Arc<AuthManager>>,
     /// Runtime config key-value store.
     pub runtime_config: Arc<Mutex<std::collections::HashMap<String, String>>>,
     /// Shard manager for cluster sharding.
@@ -97,6 +98,11 @@ pub struct Executor {
     pub api_store: Arc<crate::api::ApiStore>,
     /// Per-table disk eviction stores (disk mode only).
     pub disk_stores: Arc<Mutex<std::collections::HashMap<String, DiskRowStore>>>,
+    /// The user authenticated on this connection (set by AUTH command).
+    /// Uses RwLock for interior mutability since execute_inner takes &self.
+    pub session_user: std::sync::RwLock<Option<crate::auth::User>>,
+    /// Current trigger recursion depth — prevents infinite trigger loops.
+    trigger_depth: std::sync::atomic::AtomicU32,
 }
 
 impl Executor {
@@ -114,6 +120,8 @@ impl Executor {
             trigger_store: Arc::new(TriggerStore::new()),
             api_store: Arc::new(crate::api::ApiStore::new()),
             disk_stores: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            session_user: std::sync::RwLock::new(None),
+            trigger_depth: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -136,6 +144,8 @@ impl Executor {
             trigger_store: Arc::new(TriggerStore::new()),
             api_store: Arc::new(crate::api::ApiStore::new()),
             disk_stores: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            session_user: std::sync::RwLock::new(None),
+            trigger_depth: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -947,18 +957,31 @@ impl Executor {
         match &self.auth_manager {
             None => Ok(QueryResult::ok("open mode: authentication not required", t0.elapsed())),
             Some(am) => {
-                let am = am.lock().unwrap();
-                am.authenticate(&username, &password)
-                    .map(|_| QueryResult::ok(format!("authenticated as `{username}`"), t0.elapsed()))
+                let user = am.authenticate(&username, &password)?;
+                // Store authenticated user for the lifetime of this session.
+                if let Ok(mut guard) = self.session_user.write() {
+                    *guard = Some(user);
+                }
+                Ok(QueryResult::ok(format!("authenticated as `{username}`"), t0.elapsed()))
             }
         }
     }
 
+    /// Return true if the current session user is an admin (or auth is off).
+    fn session_is_admin(&self) -> bool {
+        if self.auth_manager.is_none() {
+            return true; // open mode — everyone is admin
+        }
+        self.session_user.read()
+            .ok()
+            .and_then(|g| g.as_ref().map(|u| u.is_admin))
+            .unwrap_or(false)
+    }
+
     fn exec_create_user(&self, username: String, password: String, is_admin: bool, t0: Instant) -> Result<QueryResult, FlowError> {
         match &self.auth_manager {
-            None => Err(FlowError::auth("auth not configured; start server with --secured")),
+            None => Err(FlowError::auth("auth not configured; start server without --no-auth")),
             Some(am) => {
-                let am = am.lock().unwrap();
                 let acting = crate::auth::User::new("system", "", true);
                 am.create_user(&acting, &username, &password, is_admin)?;
                 Ok(QueryResult::ok(format!("user `{username}` created"), t0.elapsed()))
@@ -970,7 +993,6 @@ impl Executor {
         match &self.auth_manager {
             None => Err(FlowError::auth("auth not configured")),
             Some(am) => {
-                let am = am.lock().unwrap();
                 let acting = crate::auth::User::new("system", "", true);
                 am.drop_user(&acting, &username)?;
                 Ok(QueryResult::ok(format!("user `{username}` dropped"), t0.elapsed()))
@@ -984,7 +1006,6 @@ impl Executor {
             Some(am) => {
                 let op_parsed = crate::auth::Op::from_str(&op)
                     .ok_or_else(|| FlowError::parse(format!("unknown operation `{op}`")))?;
-                let am = am.lock().unwrap();
                 let acting = crate::auth::User::new("system", "", true);
                 am.grant(&acting, &username, op_parsed, table.clone())?;
                 Ok(QueryResult::ok(
@@ -1001,7 +1022,6 @@ impl Executor {
             Some(am) => {
                 let op_parsed = crate::auth::Op::from_str(&op)
                     .ok_or_else(|| FlowError::parse(format!("unknown operation `{op}`")))?;
-                let am = am.lock().unwrap();
                 let acting = crate::auth::User::new("system", "", true);
                 am.revoke(&acting, &username, &op_parsed, table.as_deref())?;
                 Ok(QueryResult::ok(
@@ -1020,7 +1040,6 @@ impl Executor {
                 elapsed_ms: t0.elapsed().as_millis() as u64,
             }),
             Some(am) => {
-                let am = am.lock().unwrap();
                 let rows = am.list_users().into_iter().map(|(name, is_admin)| {
                     vec![Value::Text(name), Value::Bool(is_admin)]
                 }).collect();
@@ -1105,6 +1124,24 @@ impl Executor {
 
     // ── Time Travel ──────────────────────────────────────────────────────
 
+    /// Check SELECT permission for the current session on `table`.
+    /// Returns Ok(()) in open mode or when the user has access.
+    fn check_select_permission(&self, table: &str) -> Result<(), FlowError> {
+        if let Some(am) = &self.auth_manager {
+            let user_guard = self.session_user.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(user) = user_guard.as_ref() {
+                if !user.can(&crate::auth::Op::Select, table) {
+                    return Err(FlowError::auth(format!(
+                        "permission denied: SELECT on `{}`", table
+                    )));
+                }
+            } else if am.auth_required {
+                return Err(FlowError::auth("not authenticated"));
+            }
+        }
+        Ok(())
+    }
+
     fn exec_get_as_of(
         &self,
         table: String,
@@ -1114,6 +1151,10 @@ impl Executor {
         limit: Option<u64>,
         t0: Instant,
     ) -> Result<QueryResult, FlowError> {
+        // Time-travel bypasses current row visibility — apply the same SELECT
+        // permission check as a regular GET to prevent historical data leaks.
+        self.check_select_permission(&table)?;
+
         use chrono::DateTime;
 
         let cutoff = DateTime::parse_from_rfc3339(&timestamp)
@@ -1177,6 +1218,7 @@ impl Executor {
         limit: Option<u64>,
         t0: Instant,
     ) -> Result<QueryResult, FlowError> {
+        self.check_select_permission(&table)?;
         let tbl = self.db.get_table(&table)?;
         let guard = tbl.read().unwrap();
 
@@ -1227,6 +1269,9 @@ impl Executor {
         do_query: String,
         t0: Instant,
     ) -> Result<QueryResult, FlowError> {
+        if !self.session_is_admin() {
+            return Err(FlowError::auth("only admin users can create triggers"));
+        }
         let ev = match event.to_uppercase().as_str() {
             "PUT" => TriggerEvent::Put,
             "SET" => TriggerEvent::Set,
@@ -1238,6 +1283,9 @@ impl Executor {
     }
 
     fn exec_drop_trigger(&self, name: String, t0: Instant) -> Result<QueryResult, FlowError> {
+        if !self.session_is_admin() {
+            return Err(FlowError::auth("only admin users can drop triggers"));
+        }
         self.trigger_store.drop_trigger(&name)?;
         Ok(QueryResult::ok(format!("trigger `{}` dropped", name), t0.elapsed()))
     }
@@ -1260,13 +1308,22 @@ impl Executor {
         })
     }
 
+    /// Maximum trigger call depth — prevents A→B→A infinite loops.
+    const MAX_TRIGGER_DEPTH: u32 = 5;
+
     /// Fire any triggers matching an event + table after a mutating operation.
     /// Errors from triggers are logged but do NOT fail the parent operation.
     fn fire_triggers(&self, event: TriggerEvent, table: &str) {
+        let depth = self.trigger_depth.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if depth >= Self::MAX_TRIGGER_DEPTH {
+            self.trigger_depth.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            debug!("trigger recursion limit ({}) reached — skipping trigger on `{}`",
+                Self::MAX_TRIGGER_DEPTH, table);
+            return;
+        }
         let triggers = self.trigger_store.get_matching(&event, table);
         for trigger in triggers {
             let sql = trigger.do_query.clone();
-            // Parse and execute the DO query
             match crate::sql::parser::Parser::parse_str(&sql) {
                 Ok(stmts) => {
                     for stmt in stmts {
@@ -1280,9 +1337,13 @@ impl Executor {
                 }
             }
         }
+        self.trigger_depth.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     // ── Graph ─────────────────────────────────────────────────────────────
+
+    const MAX_GRAPH_LIMIT: usize = 10_000;
+    const DEFAULT_GRAPH_LIMIT: usize = 100;
 
     #[allow(clippy::too_many_arguments)]
     fn exec_graph_match(
@@ -1297,7 +1358,32 @@ impl Executor {
         limit: Option<u64>,
         t0: Instant,
     ) -> Result<QueryResult, FlowError> {
-        let k = limit.unwrap_or(100) as usize;
+        // Enforce mandatory limit — unbounded graph traversal can exhaust memory.
+        let requested = limit.unwrap_or(Self::DEFAULT_GRAPH_LIMIT as u64) as usize;
+        if requested > Self::MAX_GRAPH_LIMIT {
+            return Err(FlowError::Parse(format!(
+                "GRAPH MATCH LIMIT cannot exceed {} (got {})",
+                Self::MAX_GRAPH_LIMIT, requested
+            )));
+        }
+        let k = requested;
+
+        // Check SELECT permission on all three tables referenced in the pattern.
+        if let Some(am) = &self.auth_manager {
+            let user_guard = self.session_user.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(user) = user_guard.as_ref() {
+                for tbl in &[&src_table, &edge_table, &dst_table] {
+                    if !user.can(&crate::auth::Op::Select, tbl) {
+                        return Err(FlowError::auth(format!(
+                            "permission denied: SELECT on `{}`", tbl
+                        )));
+                    }
+                }
+            } else if am.auth_required {
+                return Err(FlowError::auth("not authenticated"));
+            }
+        }
+
         let results = crate::graph::GraphEngine::match_query(
             &self.db,
             &src_alias, &src_table,
@@ -1337,9 +1423,12 @@ impl Executor {
     // ── REST API ──────────────────────────────────────────────────────────
 
     fn exec_api_generate(&self, table: String, t0: Instant) -> Result<QueryResult, FlowError> {
-        let port = self.api_store.start_sync(Arc::clone(&self.db), table.clone())?;
+        let (port, api_key) = self.api_store.start_sync(Arc::clone(&self.db), table.clone())?;
         Ok(QueryResult::ok(
-            format!("REST API for `{}` running at http://127.0.0.1:{}/api/{}", table, port, table),
+            format!(
+                "REST API for `{}` running at http://127.0.0.1:{}/api/{} — API key: {} (include as: Authorization: Bearer {})",
+                table, port, table, api_key, api_key
+            ),
             t0.elapsed(),
         ))
     }

@@ -25,9 +25,12 @@ PulseDB is a self-contained, production-ready database engine that stores data i
 | **Vector Search** | Cosine similarity search with HNSW index (`SIMILAR`) |
 | **Streaming** | Real-time push subscriptions with `WATCH` |
 | **Transactions** | `BEGIN` / `COMMIT` / `ROLLBACK` with MVCC isolation |
-| **Security** | Users, SHA-256 passwords, roles, per-table permissions |
+| **Security** | Users, Argon2id passwords, roles, per-table permissions |
+| **TLS** | Encrypted transport via `--tls-cert` / `--tls-key`; REPL `--tls` flag |
+| **WAL Encryption** | AES-256-GCM at-rest encryption via `PULSEDB_WAL_KEY` env var |
+| **REST Rate Limiting** | 100 requests/second per IP; HTTP 429 on exceed |
 | **Clustering** | Peer heartbeats, Raft consensus, FNV-1a shard routing |
-| **REST API** | Auto-generated HTTP endpoint per table (`API GENERATE`) |
+| **REST API** | Auto-generated HTTP endpoint per table (`API GENERATE FOR`) with API key auth |
 | **Windows Service** | Runs as a background service that starts with Windows |
 | **Linux / systemd** | Prints a ready-to-use systemd unit file (`systemd-unit`) |
 | **Docker** | Official multi-stage image — single node or 3-node cluster |
@@ -56,9 +59,23 @@ Open **any terminal** and run:
 pulsedb-server
 ```
 
-You should see:
+On first start, the server prints a generated admin password — **save it**:
+
 ```
+=============================================================
+ PulseDB admin password (save this — shown only once):
+   user:     admin
+   password: xK7mQpRt9nVw3bYs2cZj
+ Set PULSEDB_ADMIN_PASSWORD env var to skip this on restart.
+=============================================================
 [INFO] PulseDB 0.2.0 listening on 127.0.0.1:7878
+```
+
+On subsequent starts, set the env var so the password isn't regenerated:
+
+```powershell
+$env:PULSEDB_ADMIN_PASSWORD = "xK7mQpRt9nVw3bYs2cZj"
+pulsedb-server
 ```
 
 ### 3 · Connect and Query
@@ -69,9 +86,11 @@ Open a **second terminal** and run:
 pulsedb-repl
 ```
 
-At the `pulseql>` prompt, try:
+At the `pulseql>` prompt, authenticate first, then query:
 
 ```sql
+AUTH admin 'xK7mQpRt9nVw3bYs2cZj'
+
 MAKE TABLE users (id int PRIMARY KEY, name text, age int)
 
 PUT users { id: 1, name: "Alice", age: 30 }
@@ -94,12 +113,13 @@ That's it — you're running PulseDB.
 2. [Running the Server](#running-the-server)
 3. [Windows Service](#windows-service)
 4. [Linux Service (systemd)](#linux-service-systemd)
-5. [Connecting with the REPL](#connecting-with-the-repl)
-6. [Client SDKs](#client-sdks)
+5. [TLS (Encrypted Transport)](#tls-encrypted-transport)
+6. [Connecting with the REPL](#connecting-with-the-repl)
+7. [Client SDKs](#client-sdks)
    - [Python](#python)
    - [Go](#go)
    - [JavaScript](#javascript)
-7. [PulseQL Language Reference](#pulseql-language-reference)
+8. [PulseQL Language Reference](#pulseql-language-reference)
    - [Data Types](#data-types)
    - [Table Management](#table-management)
    - [Writing Data](#writing-data)
@@ -119,13 +139,13 @@ That's it — you're running PulseDB.
    - [AI Search](#ai-search)
    - [Admin Commands](#admin-commands)
    - [Resource Configuration](#resource-configuration)
-8. [Expressions & Operators](#expressions--operators)
-9. [Response Format](#response-format)
-10. [Metrics](#metrics)
-11. [Architecture](#architecture)
-12. [Quick Reference Card](#quick-reference-card)
-13. [Troubleshooting](#troubleshooting)
-14. [License & Pricing](#license--pricing)
+9. [Expressions & Operators](#expressions--operators)
+10. [Response Format](#response-format)
+11. [Metrics](#metrics)
+12. [Architecture](#architecture)
+13. [Quick Reference Card](#quick-reference-card)
+14. [Troubleshooting](#troubleshooting)
+15. [License & Pricing](#license--pricing)
 
 ---
 
@@ -180,15 +200,22 @@ Output binaries:
 
 No Rust toolchain required. Works on Linux, macOS, and Windows with Docker Desktop.
 
-```bash
-# Pull and run
-docker compose up -d
+**Before starting**, copy `.env.example` to `.env` and set your admin password:
 
-# Connect with the REPL
-docker run --rm -it --network host pulsedb/pulsedb pulsedb-repl
+```bash
+cp .env.example .env
+# Edit .env and set PULSEDB_ADMIN_PASSWORD=your-strong-password
 ```
 
-Data is persisted in a named Docker volume (`pulsedb-data`). To run a 3-node cluster, see the commented cluster section in `docker-compose.yml`.
+```bash
+# Start (reads credentials from .env)
+docker compose up -d
+
+# Connect with the REPL (container shares the internal network)
+docker exec -it pulsedb pulsedb-repl
+```
+
+The server binds to port 7878 on the internal Docker network only — not exposed to the host. To allow host access during development, add `ports: ["127.0.0.1:7878:7878"]` to `docker-compose.yml`. Data is persisted in a named Docker volume (`pulsedb-data`). To run a 3-node cluster, see the commented cluster section in `docker-compose.yml`.
 
 ```bash
 # Build the image locally instead
@@ -218,21 +245,27 @@ Default address: `127.0.0.1:7878`
 | `--log-level <LEVEL>` | `-l` | `info` | Verbosity: `trace`, `debug`, `info`, `warn`, `error` |
 | `--mode <MODE>` | | `memory` | Storage mode: `memory` or `disk` |
 | `--row-cache <N>` | | `500000` | Per-table in-memory row limit before disk eviction (disk mode only) |
+| `--admin-user <NAME>` | | `admin` | Username for the initial admin account |
+| `--admin-password <PWD>` | | *(generated)* | Admin password — also read from `PULSEDB_ADMIN_PASSWORD` env var |
+| `--no-auth` | | *(off)* | Disable authentication — every client is treated as admin (dev only) |
+| `--tls-cert <PATH>` | | *(off)* | Path to a PEM TLS certificate — enables TLS when combined with `--tls-key` |
+| `--tls-key <PATH>` | | *(off)* | Path to a PEM TLS private key |
 
 **Examples:**
 
 ```powershell
-# Listen on all network interfaces
+# Use a fixed admin password (recommended for production)
+$env:PULSEDB_ADMIN_PASSWORD = "my-strong-password"
+pulsedb-server
+
+# Disable auth entirely (dev/localhost only)
+pulsedb-server --no-auth
+
+# Custom admin user name
+pulsedb-server --admin-user dbadmin --admin-password my-strong-password
+
+# Listen on all interfaces (for Docker / remote access)
 pulsedb-server --addr 0.0.0.0:7878
-
-# Custom WAL file and data directory
-pulsedb-server --wal C:\data\pulsedb.wal --data-dir C:\data\pulsedb
-
-# Enable disk mode with 100k row cache per table
-pulsedb-server --mode disk --row-cache 100000
-
-# Debug logging
-pulsedb-server --log-level debug
 
 # All flags combined
 pulsedb-server --addr 0.0.0.0:7878 --wal C:\data\pulsedb.wal --data-dir C:\data\pulsedb --mode disk --log-level info
@@ -311,6 +344,64 @@ The generated unit file runs the server as a `pulsedb` system user with `Restart
 
 ---
 
+## TLS (Encrypted Transport)
+
+By default PulseDB speaks plain TCP. Enable TLS to encrypt all traffic between clients and the server — required for any deployment where the network isn't trusted (cloud VMs, remote access, non-localhost Docker).
+
+### Generate a self-signed certificate (development)
+
+```bash
+openssl req -x509 -newkey rsa:4096 \
+  -keyout key.pem -out cert.pem \
+  -days 365 -nodes \
+  -subj "/CN=localhost"
+```
+
+### Start the server with TLS
+
+```powershell
+pulsedb-server --tls-cert cert.pem --tls-key key.pem
+```
+
+All connections — REPL, SDK clients, REST API — are now encrypted. The server refuses plain TCP connections.
+
+### Connect the REPL with TLS
+
+```powershell
+# Self-signed cert (skips certificate verification — dev only)
+pulsedb-repl --tls --tls-no-verify
+
+# Production (verifies cert against system trust roots)
+pulsedb-repl --tls --addr myserver.example.com:7878
+```
+
+| Flag | Description |
+| --- | --- |
+| `--tls` | Enable TLS on the REPL connection |
+| `--tls-no-verify` | Skip certificate verification (self-signed certs, dev only) |
+
+### SDK clients with TLS
+
+Until the SDKs add native TLS support, tunnel the connection through a local TLS proxy (e.g. `stunnel`) or connect only from localhost over a TLS-terminated reverse proxy (e.g. nginx, Caddy).
+
+### WAL Encryption (at-rest)
+
+Even with TLS, WAL data on disk is plaintext. Encrypt it with AES-256-GCM by setting `PULSEDB_WAL_KEY`:
+
+```bash
+# Generate a 32-byte key (64 hex chars)
+export PULSEDB_WAL_KEY="$(openssl rand -hex 32)"
+
+# Start the server — WAL records are now encrypted on disk
+pulsedb-server
+```
+
+The key is **not** stored anywhere by PulseDB — you must supply it on every start. Store it in a secrets manager (AWS Secrets Manager, HashiCorp Vault, etc.) and inject it as an env var.
+
+> If `PULSEDB_WAL_KEY` is unset at startup, WAL records are written as plain JSON (backward-compatible). Set it to enable encryption going forward. Existing unencrypted records are automatically detected and read without decryption; new records will be encrypted.
+
+---
+
 ## Connecting with the REPL
 
 `pulsedb-repl` is the interactive command-line client.
@@ -345,14 +436,22 @@ Official client libraries are in the `clients/` directory. Each wraps the TCP + 
 **Requirements:** Python 3.8+, no extra dependencies.
 
 ```bash
-pip install clients/python
+# From the cloned repo
+git clone https://github.com/Ajaikumar0712/PulseDB
+pip install ./PulseDB/clients/python
+
+# Once published to PyPI (coming soon)
+# pip install pulsedb
 ```
 
+> **Security note:** PulseDB connections are not yet encrypted. Only connect over localhost or a trusted private network. TLS support is on the roadmap.
+
 ```python
+import os
 from pulsedb import PulseDB, PulseDBError
 
 with PulseDB.connect("127.0.0.1", 7878) as db:
-    db.auth("alice", "secret123")
+    db.auth(os.environ["PULSEDB_USER"], os.environ["PULSEDB_PASSWORD"])  # never hardcode
 
     db.query("MAKE TABLE users (id int PRIMARY KEY, name text, age int)")
     db.query('PUT users { id: 1, name: "Alice", age: 30 }')
@@ -391,11 +490,14 @@ with PulseDB.connect("127.0.0.1", 7878) as db:
 go get github.com/Ajaikumar0712/PulseDB/clients/go
 ```
 
+> **Security note:** PulseDB connections are not yet encrypted. Only connect over localhost or a trusted private network. TLS support is on the roadmap.
+
 ```go
 package main
 
 import (
     "fmt"
+    "os"
     pulsedb "github.com/Ajaikumar0712/PulseDB/clients/go"
 )
 
@@ -406,7 +508,7 @@ func main() {
     }
     defer c.Close()
 
-    c.Auth("alice", "secret123")
+    c.Auth(os.Getenv("PULSEDB_USER"), os.Getenv("PULSEDB_PASSWORD"))  // never hardcode
 
     c.Query(`MAKE TABLE users (id int PRIMARY KEY, name text, age int)`)
     c.Query(`PUT users { id: 1, name: "Alice", age: 30 }`)
@@ -446,13 +548,15 @@ The `Client` is thread-safe — a single connection can be shared across gorouti
 # Copy or symlink clients/javascript/index.js into your project
 ```
 
+> **Security note:** PulseDB connections are not yet encrypted. Only connect over localhost or a trusted private network. TLS support is on the roadmap.
+
 ```js
 const { PulseDB } = require('./clients/javascript');
 
 async function main() {
     const db = await PulseDB.connect({ host: '127.0.0.1', port: 7878 });
 
-    await db.auth('alice', 'secret123');
+    await db.auth(process.env.PULSEDB_USER, process.env.PULSEDB_PASSWORD);  // never hardcode
 
     await db.query(`MAKE TABLE users (id int PRIMARY KEY, name text, age int)`);
     await db.query(`PUT users { id: 1, name: "Alice", age: 30 }`);
@@ -928,7 +1032,14 @@ API GENERATE FOR <table>
 API GENERATE FOR users
 ```
 
-This starts an HTTP server on an auto-assigned port (starting at 7879) and logs the address. Five endpoints are created per table:
+This starts an HTTP server on an auto-assigned port (starting at 7879), bound to `127.0.0.1`. The response includes a **per-table API key** — include it on every request:
+
+```
+REST API for `users` running at http://127.0.0.1:7879/api/users
+API key: a3f9c2b1d4e8f07a6b5c4d3e2f1a0b9c (include as: Authorization: Bearer a3f9c2b1d4e8f07a6b5c4d3e2f1a0b9c)
+```
+
+Five endpoints are created per table:
 
 | Method | Path | Action |
 | --- | --- | --- |
@@ -938,29 +1049,34 @@ This starts an HTTP server on an auto-assigned port (starting at 7879) and logs 
 | `PUT` | `/api/<table>/<id>` | Update row fields (body: partial JSON) |
 | `DELETE` | `/api/<table>/<id>` | Delete a row |
 
+All requests must include `Authorization: Bearer <api_key>`. Missing or wrong keys return HTTP 401.
+
 > Nested objects are not supported in POST/PUT request bodies.
 
 **Example (PowerShell):**
 
 ```powershell
+$key = "a3f9c2b1d4e8f07a6b5c4d3e2f1a0b9c"  # from API GENERATE FOR output
+$h   = @{ Authorization = "Bearer $key" }
+
 # Read all rows
-Invoke-RestMethod -Uri "http://127.0.0.1:7879/api/users" -Method GET
+Invoke-RestMethod -Uri "http://127.0.0.1:7879/api/users" -Method GET -Headers $h
 
 # Insert a row
-Invoke-RestMethod -Uri "http://127.0.0.1:7879/api/users" -Method POST `
+Invoke-RestMethod -Uri "http://127.0.0.1:7879/api/users" -Method POST -Headers $h `
     -ContentType "application/json" `
     -Body '{"id":99,"name":"REST User","age":22}'
 
 # Fetch by ID
-Invoke-RestMethod -Uri "http://127.0.0.1:7879/api/users/<uuid>" -Method GET
+Invoke-RestMethod -Uri "http://127.0.0.1:7879/api/users/<uuid>" -Method GET -Headers $h
 
 # Update fields
-Invoke-RestMethod -Uri "http://127.0.0.1:7879/api/users/<uuid>" -Method PUT `
+Invoke-RestMethod -Uri "http://127.0.0.1:7879/api/users/<uuid>" -Method PUT -Headers $h `
     -ContentType "application/json" `
     -Body '{"age":23}'
 
 # Delete
-Invoke-RestMethod -Uri "http://127.0.0.1:7879/api/users/<uuid>" -Method DELETE
+Invoke-RestMethod -Uri "http://127.0.0.1:7879/api/users/<uuid>" -Method DELETE -Headers $h
 ```
 
 #### API STOP — Shut down an endpoint
@@ -981,9 +1097,9 @@ Returns each active table alongside its port number.
 
 ### Security & User Management
 
-PulseDB supports user accounts with SHA-256 hashed passwords, admin roles, and per-table operation grants.
+PulseDB supports user accounts with **Argon2id** hashed passwords (memory-hard, GPU-resistant), admin roles, and per-table operation grants.
 
-By default the server starts in **open mode** — no authentication required. When secured mode is enabled, every connection must call `AUTH` before running queries.
+**Authentication is required by default.** Every connection must call `AUTH` before running queries. Pass `--no-auth` to disable authentication (localhost / development only).
 
 #### AUTH — Authenticate a session
 
@@ -1098,6 +1214,8 @@ CLUSTER SHARD DROP orders
 
 Triggers fire a PulseQL query automatically whenever a specific mutation event occurs on a table.
 
+> **Admin only.** `TRIGGER` and `DROP TRIGGER` require an admin session. Trigger recursion is capped at depth 5 to prevent infinite loops.
+
 #### TRIGGER — Create a trigger
 
 ```
@@ -1138,6 +1256,8 @@ GRAPH MATCH (src_alias:src_table) -[edge_alias:edge_table]-> (dst_alias:dst_tabl
 
 The edge table must have `from_id` and `to_id` columns pointing to the primary keys of the source and destination tables. Result columns are prefixed with their alias (e.g. `a.name`, `rel.weight`, `b.id`).
 
+> **Limits:** Default LIMIT is 100. Maximum is 10,000 — queries above this return an error. The limit is mandatory to prevent unbounded traversal from exhausting memory. SELECT permission is checked on all three tables (src, edge, dst) before execution.
+
 **Setup:**
 
 ```sql
@@ -1163,6 +1283,8 @@ GRAPH MATCH (a:people) -[rel:follows]-> (b:people)
 
 Retrieve historical snapshots of data by timestamp or WAL version number.
 
+> **Permissions:** `AS OF` and `VERSION` queries apply the same SELECT permission check as a regular `GET`. A user without SELECT on a table cannot read its historical data.
+
 #### AS OF — Query data at a point in time
 
 ```
@@ -1187,17 +1309,25 @@ GET users VERSION 42
 
 ### AI Search
 
-`AI SEARCH` performs semantic text search over a table using built-in 128-dimensional FNV-1a embeddings.
+`AI SEARCH` performs hash-based text search over a table. Internally it projects text into a 128-dimensional space using FNV-1a hashing, then ranks rows by vector proximity to the query projection.
+
+> **Important:** FNV-1a is a hash function, not a language model. `AI SEARCH` matches on lexical overlap — it does **not** understand synonyms, intent, or meaning. "fast" and "quick" will not match each other. For genuine semantic search, store embeddings from a real model (OpenAI, HuggingFace, etc.) in a `vector` column and use `SIMILAR` instead.
 
 ```
 AI SEARCH <table> "<query>" [LIMIT <n>]
 ```
 
 ```sql
+-- Works well for exact or near-exact keyword matches
 AI SEARCH products "noise cancelling headphones" LIMIT 5
 ```
 
-Results are ranked by embedding similarity. For higher-quality semantic search, store your own model-generated vectors in a `vector` column and use `SIMILAR` instead.
+For true semantic similarity search, use `SIMILAR` with your own embeddings:
+
+```sql
+-- Store a model-generated embedding and query by vector
+SIMILAR products ON embedding TO [0.12, 0.85, ...] LIMIT 5
+```
 
 ---
 
@@ -1452,7 +1582,7 @@ flowchart TD
 ```
 pulsedb-server
   ├── server.rs          — TCP listener; channel-based writer per connection
-  ├── auth.rs            — Users, SHA-256 passwords, roles, per-table grants
+  ├── auth.rs            — Users, Argon2id passwords, roles, per-table grants
   ├── resource.rs        — Connection limits, row quotas, query deadlines
   ├── sql/
   │   ├── lexer.rs       — Tokeniser
@@ -1473,7 +1603,7 @@ pulsedb-server
   ├── api/
   │   └── mod.rs         — ApiStore: auto-generated HTTP/1.1 REST endpoints
   ├── ai/
-  │   └── mod.rs         — FNV-1a text embeddings for AI SEARCH
+  │   └── mod.rs         — FNV-1a hash projection for AI SEARCH (lexical, not semantic)
   ├── graph/
   │   └── mod.rs         — GRAPH MATCH: 3-way node-edge-node traversal
   ├── storage/
@@ -1651,6 +1781,31 @@ GET big_table LIMIT 1000 TIMEOUT "30s"
 -- Server-wide default
 CONFIG SET default_timeout_ms 30000
 ```
+
+### "not authenticated" or "permission denied" errors
+
+Every connection must authenticate before running queries. Run `AUTH <user> '<password>'` immediately after connecting:
+
+```sql
+AUTH admin 'your-password'
+```
+
+If you've lost the admin password, restart the server with a new one:
+
+```powershell
+$env:PULSEDB_ADMIN_PASSWORD = "new-strong-password"
+pulsedb-server
+```
+
+For local development, start with `--no-auth` to skip authentication entirely:
+
+```powershell
+pulsedb-server --no-auth
+```
+
+### "GRAPH MATCH LIMIT cannot exceed 10000"
+
+Add or reduce the `LIMIT` clause on your `GRAPH MATCH` query. The hard cap is 10,000 rows per traversal to prevent memory exhaustion.
 
 ### Windows Service — "access denied"
 

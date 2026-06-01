@@ -17,9 +17,10 @@
 //! No external HTTP crate required.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::Instant;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -27,6 +28,38 @@ use tokio::net::TcpListener;
 use crate::error::FlowError;
 use crate::storage::table::Database;
 use crate::types::Value;
+
+// ── Rate limiter ─────────────────────────────────────────────────────────
+
+/// Simple per-IP token bucket: `max_rps` requests per second per IP.
+/// On every request: if the last reset was >1s ago, reset count. Then
+/// increment and allow if count <= max_rps, else reject.
+#[derive(Clone)]
+struct RateLimiter {
+    state: Arc<Mutex<HashMap<IpAddr, (u32, Instant)>>>,
+    max_rps: u32,
+}
+
+impl RateLimiter {
+    fn new(max_rps: u32) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(HashMap::new())),
+            max_rps,
+        }
+    }
+
+    /// Returns `true` if the request is allowed, `false` if rate-limited.
+    fn check(&self, ip: IpAddr) -> bool {
+        let mut map = self.state.lock().unwrap();
+        let entry = map.entry(ip).or_insert((0, Instant::now()));
+        if entry.1.elapsed().as_secs() >= 1 {
+            *entry = (1, Instant::now());
+            return true;
+        }
+        entry.0 += 1;
+        entry.0 <= self.max_rps
+    }
+}
 
 // ── Port allocation ──────────────────────────────────────────────────────
 
@@ -39,29 +72,32 @@ fn alloc_port() -> u16 {
 // ── ApiStore ────────────────────────────────────────────────────────────
 
 pub struct ApiStore {
-    /// table -> (port, shutdown_sender)
-    active: RwLock<HashMap<String, (u16, tokio::sync::oneshot::Sender<()>)>>,
+    /// table -> (port, shutdown_sender, api_key)
+    active: RwLock<HashMap<String, (u16, tokio::sync::oneshot::Sender<()>, String)>>,
+    /// Shared rate limiter — 100 requests per second per IP across all REST endpoints.
+    rate_limiter: RateLimiter,
 }
 
 impl ApiStore {
     pub fn new() -> Self {
         Self {
             active: RwLock::new(HashMap::new()),
+            rate_limiter: RateLimiter::new(100),
         }
     }
 
-    /// Start a REST API for `table_name`.  Returns the port number.
-    /// Called from a synchronous context; uses the current tokio Handle to spawn.
+    /// Start a REST API for `table_name`.
+    /// Returns `(port, api_key)`. The api_key must be sent as `Authorization: Bearer <key>`.
     pub fn start_sync(
         &self,
         db: Arc<Database>,
         table_name: String,
-    ) -> Result<u16, FlowError> {
+    ) -> Result<(u16, String), FlowError> {
         let mut guard = self.active.write()
             .map_err(|_| FlowError::Io("lock poisoned".into()))?;
 
-        if let Some((port, _)) = guard.get(&table_name) {
-            return Ok(*port); // already running
+        if let Some((port, _, key)) = guard.get(&table_name) {
+            return Ok((*port, key.clone())); // already running
         }
 
         let port = alloc_port();
@@ -69,26 +105,29 @@ impl ApiStore {
             .parse()
             .map_err(|_| FlowError::Io("invalid address".into()))?;
 
+        // Generate a random API key (UUID v4, no dashes)
+        let api_key = uuid::Uuid::new_v4().to_string().replace('-', "");
+
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let tname = table_name.clone();
         let db2 = Arc::clone(&db);
+        let key2 = api_key.clone();
+        let rl2 = self.rate_limiter.clone();
 
-        // get the current tokio handle - if no runtime, just skip spawning
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
                 handle.spawn(async move {
                     match TcpListener::bind(addr).await {
-                        Ok(listener) => run_server(listener, db2, tname, rx).await,
+                        Ok(listener) => run_server(listener, db2, tname, key2, rl2, rx).await,
                         Err(e) => eprintln!("[PulseDB API] bind error on port {}: {}", port, e),
                     }
                 });
-                guard.insert(table_name, (port, tx));
-                Ok(port)
+                guard.insert(table_name, (port, tx, api_key.clone()));
+                Ok((port, api_key))
             }
             Err(_) => {
-                // No tokio runtime (e.g., unit test context): record entry only
-                guard.insert(table_name, (port, tx));
-                Ok(port)
+                guard.insert(table_name, (port, tx, api_key.clone()));
+                Ok((port, api_key))
             }
         }
     }
@@ -98,7 +137,7 @@ impl ApiStore {
         let mut guard = self.active.write()
             .map_err(|_| FlowError::Io("lock poisoned".into()))?;
         match guard.remove(table_name) {
-            Some((_, tx)) => {
+            Some((_, tx, _)) => {
                 let _ = tx.send(());
                 Ok(())
             }
@@ -112,7 +151,7 @@ impl ApiStore {
     /// List all active APIs: (table, port).
     pub fn list_sync(&self) -> Vec<(String, u16)> {
         self.active.read()
-            .map(|g| g.iter().map(|(t, (p, _))| (t.clone(), *p)).collect())
+            .map(|g| g.iter().map(|(t, (p, _, _))| (t.clone(), *p)).collect())
             .unwrap_or_default()
     }
 }
@@ -123,16 +162,20 @@ async fn run_server(
     listener: TcpListener,
     db: Arc<Database>,
     table: String,
+    api_key: String,
+    rate_limiter: RateLimiter,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
 ) {
     loop {
         tokio::select! {
             accept = listener.accept() => {
                 match accept {
-                    Ok((stream, _)) => {
+                    Ok((stream, peer)) => {
                         let db2 = Arc::clone(&db);
                         let tbl = table.clone();
-                        tokio::spawn(handle_connection(stream, db2, tbl));
+                        let key = api_key.clone();
+                        let rl  = rate_limiter.clone();
+                        tokio::spawn(handle_connection(stream, db2, tbl, key, rl, peer));
                     }
                     Err(_) => break,
                 }
@@ -148,7 +191,16 @@ async fn handle_connection(
     mut stream: tokio::net::TcpStream,
     db: Arc<Database>,
     table: String,
+    api_key: String,
+    rate_limiter: RateLimiter,
+    peer: SocketAddr,
 ) {
+    // Rate check — before reading any data to avoid resource exhaustion
+    if !rate_limiter.check(peer.ip()) {
+        let _ = write_response(&mut stream, 429, "Too Many Requests",
+            b"{\"error\":\"rate limit exceeded - max 100 requests/second per IP\"}").await;
+        return;
+    }
     // Read request headers (loop until we find the header/body separator)
     let mut buf = vec![0u8; 65536];
     let mut total = 0usize;
@@ -168,8 +220,9 @@ async fn handle_connection(
         }
     };
 
-    // Parse Content-Length from headers so we can read the full body
-    let headers_raw = std::str::from_utf8(&buf[..header_end]).unwrap_or("");
+    // Convert headers to owned String early to avoid holding a borrow over buf
+    // while we later mutably borrow buf to read the remaining body bytes.
+    let headers_raw = std::str::from_utf8(&buf[..header_end]).unwrap_or("").to_owned();
     let content_length: usize = headers_raw
         .lines()
         .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
@@ -200,6 +253,20 @@ async fn handle_connection(
     }
     let method = parts[0].to_uppercase();
     let path   = parts[1];
+
+    // Validate API key from Authorization: Bearer <key> header
+    let auth_header = headers_raw
+        .lines()
+        .find(|l| l.to_ascii_lowercase().starts_with("authorization:"))
+        .and_then(|l| l.splitn(2, ':').nth(1))
+        .map(|v| v.trim());
+    let provided_key = auth_header
+        .and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer ")));
+    if provided_key != Some(api_key.as_str()) {
+        let _ = write_response(&mut stream, 401, "Unauthorized",
+            b"{\"error\":\"missing or invalid API key - include Authorization: Bearer <key>\"}").await;
+        return;
+    }
 
     // Find empty line separating headers from body
     let body = if let Some(idx) = raw.find("\r\n\r\n") {
@@ -411,11 +478,17 @@ async fn write_response(
     status_text: &str,
     body: &[u8],
 ) -> std::io::Result<()> {
+    // Restrictive CORS: only allow same-origin (localhost) requests.
+    // Browsers enforce this; server-side clients are unaffected.
     let header = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
-        status,
-        status_text,
-        body.len(),
+        "HTTP/1.1 {} {}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         Access-Control-Allow-Origin: http://localhost\r\n\
+         Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n\
+         Access-Control-Allow-Headers: Authorization, Content-Type\r\n\
+         Connection: close\r\n\r\n",
+        status, status_text, body.len(),
     );
     stream.write_all(header.as_bytes()).await?;
     stream.write_all(body).await?;

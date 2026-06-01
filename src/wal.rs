@@ -13,6 +13,10 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Mutex;
 
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    Aes256Gcm, Key, Nonce,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -85,6 +89,9 @@ pub struct WalWriter {
     pub path: std::path::PathBuf,
     /// When `true`, calls `sync_all()` after every append (disk-mode durability).
     sync_writes: bool,
+    /// Optional AES-256-GCM key for at-rest encryption.
+    /// Set via `PULSEDB_WAL_KEY` env var (64 hex chars = 32 bytes).
+    enc_key: Option<[u8; 32]>,
 }
 
 impl WalWriter {
@@ -94,6 +101,7 @@ impl WalWriter {
     }
 
     /// Open with explicit sync mode.  Use `sync = true` in disk mode.
+    /// Reads `PULSEDB_WAL_KEY` env var (64 hex chars) to enable AES-256-GCM encryption.
     pub fn open_with_sync(path: impl AsRef<Path>, sync: bool) -> Result<Self, FlowError> {
         let path = path.as_ref().to_path_buf();
         let file = OpenOptions::new()
@@ -101,19 +109,36 @@ impl WalWriter {
             .append(true)
             .open(&path)
             .map_err(|e| FlowError::Wal(format!("cannot open WAL at {}: {e}", path.display())))?;
-        info!("WAL opened at `{}` (sync={})", path.display(), sync);
+
+        let enc_key = load_wal_key();
+        if enc_key.is_some() {
+            info!("WAL opened at `{}` (sync={}, encryption=AES-256-GCM)", path.display(), sync);
+        } else {
+            info!("WAL opened at `{}` (sync={}, encryption=off)", path.display(), sync);
+        }
+
         Ok(Self {
             writer: Mutex::new(BufWriter::new(file)),
             path,
             sync_writes: sync,
+            enc_key,
         })
     }
 
     /// Append a single record to the WAL.
-    /// In sync mode, calls `sync_all()` for OS-level durability guarantee.
+    /// If an encryption key is configured, the record is AES-256-GCM encrypted:
+    ///   line format: `enc:<hex(nonce || ciphertext)>`
+    /// Otherwise the record is written as plain JSON.
     pub fn append(&self, record: &WalRecord) -> Result<(), FlowError> {
-        let line = serde_json::to_string(record)
+        let json = serde_json::to_string(record)
             .map_err(|e| FlowError::Wal(format!("serialization failed: {e}")))?;
+
+        let line = if let Some(key_bytes) = &self.enc_key {
+            encrypt_record(&json, key_bytes)
+                .map_err(|e| FlowError::Wal(format!("WAL encryption failed: {e}")))?
+        } else {
+            json
+        };
 
         let mut w = self.writer.lock().unwrap();
         writeln!(w, "{line}")
@@ -147,11 +172,14 @@ fn record_op_name(r: &WalRecord) -> &'static str {
 // ── Wal reader / recovery ─────────────────────────────────────────────────
 
 /// Read all WAL records from `path` for crash recovery.
+/// Automatically decrypts lines that begin with `enc:` using the `PULSEDB_WAL_KEY` env var.
 pub fn read_wal(path: impl AsRef<Path>) -> Result<Vec<WalRecord>, FlowError> {
     let path = path.as_ref();
     if !path.exists() {
         return Ok(Vec::new());
     }
+
+    let enc_key = load_wal_key();
 
     let file = File::open(path)
         .map_err(|e| FlowError::Wal(format!("cannot read WAL: {e}")))?;
@@ -167,7 +195,27 @@ pub fn read_wal(path: impl AsRef<Path>) -> Result<Vec<WalRecord>, FlowError> {
         if line.is_empty() {
             continue;
         }
-        match serde_json::from_str::<WalRecord>(line) {
+
+        // Decrypt if the line is encrypted
+        let json = if line.starts_with("enc:") {
+            match &enc_key {
+                Some(key) => match decrypt_record(line, key) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        warn!("WAL line {line_no}: decryption failed — skipping: {e}");
+                        continue;
+                    }
+                },
+                None => {
+                    warn!("WAL line {line_no}: encrypted record but PULSEDB_WAL_KEY not set — skipping");
+                    continue;
+                }
+            }
+        } else {
+            line.to_string()
+        };
+
+        match serde_json::from_str::<WalRecord>(&json) {
             Ok(r) => records.push(r),
             Err(e) => {
                 warn!("WAL line {line_no}: parse error — skipping: {e}");
@@ -175,6 +223,73 @@ pub fn read_wal(path: impl AsRef<Path>) -> Result<Vec<WalRecord>, FlowError> {
         }
     }
     Ok(records)
+}
+
+// ── Encryption helpers ────────────────────────────────────────────────────
+
+/// Read and decode `PULSEDB_WAL_KEY` env var (64 hex chars = 32 bytes).
+fn load_wal_key() -> Option<[u8; 32]> {
+    let hex = std::env::var("PULSEDB_WAL_KEY").ok()?;
+    let hex = hex.trim();
+    if hex.len() != 64 {
+        warn!("PULSEDB_WAL_KEY must be 64 hex characters (32 bytes) — WAL encryption disabled");
+        return None;
+    }
+    let mut key = [0u8; 32];
+    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+        let byte_str = std::str::from_utf8(chunk).ok()?;
+        key[i] = u8::from_str_radix(byte_str, 16).ok()?;
+    }
+    Some(key)
+}
+
+/// Encrypt a plaintext JSON string.
+/// Output format: `enc:<hex(12-byte nonce || ciphertext)>`
+fn encrypt_record(plaintext: &str, key_bytes: &[u8; 32]) -> Result<String, String> {
+    use aes_gcm::aead::OsRng;
+    use aes_gcm::aead::rand_core::RngCore;
+
+    let key = Key::<Aes256Gcm>::from_slice(key_bytes);
+    let cipher = Aes256Gcm::new(key);
+
+    let mut nonce_bytes = [0u8; 12];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext.as_bytes())
+        .map_err(|e| e.to_string())?;
+
+    // Encode as hex: nonce || ciphertext
+    let mut combined = nonce_bytes.to_vec();
+    combined.extend_from_slice(&ciphertext);
+    let hex = combined.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+    Ok(format!("enc:{hex}"))
+}
+
+/// Decrypt a `enc:<hex>` line back to JSON.
+fn decrypt_record(line: &str, key_bytes: &[u8; 32]) -> Result<String, String> {
+    let hex = line.strip_prefix("enc:").ok_or("missing enc: prefix")?;
+    let bytes: Vec<u8> = hex
+        .as_bytes()
+        .chunks(2)
+        .map(|c| {
+            let s = std::str::from_utf8(c).map_err(|e| e.to_string())?;
+            u8::from_str_radix(s, 16).map_err(|e| e.to_string())
+        })
+        .collect::<Result<_, _>>()?;
+
+    if bytes.len() < 12 {
+        return Err("ciphertext too short".into());
+    }
+    let (nonce_bytes, ciphertext) = bytes.split_at(12);
+    let key = Key::<Aes256Gcm>::from_slice(key_bytes);
+    let cipher = Aes256Gcm::new(key);
+    let nonce = Nonce::from_slice(nonce_bytes);
+    let plaintext = cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|e| e.to_string())?;
+    String::from_utf8(plaintext).map_err(|e| e.to_string())
 }
 
 /// Given a complete WAL record list, return only those records belonging to

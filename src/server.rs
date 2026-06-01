@@ -16,11 +16,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::json;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::net::TcpListener;
 use tracing::{info, warn};
 
 use crate::api::ApiStore;
+use crate::auth::AuthManager;
 use crate::cluster::ClusterRegistry;
 use crate::cluster::replication::ReplicationManager;
 use crate::engine::executor::{Executor, QueryResult};
@@ -54,6 +55,11 @@ pub struct Server {
     trigger_store: Arc<TriggerStore>,
     /// Shared REST API server store — persists across all connections.
     api_store: Arc<ApiStore>,
+    /// Authentication manager — shared across all connections.
+    auth_manager: Arc<AuthManager>,
+    /// Optional TLS acceptor. When set, every incoming TCP connection is
+    /// wrapped in a TLS handshake before the PulseQL protocol begins.
+    tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
 }
 
 impl Server {
@@ -76,7 +82,19 @@ impl Server {
             disk_cache_rows: 500_000,
             trigger_store: Arc::new(TriggerStore::new()),
             api_store: Arc::new(ApiStore::new()),
+            auth_manager: Arc::new(AuthManager::open()),
+            tls_acceptor: None,
         }
+    }
+
+    pub fn with_auth_manager(mut self, am: Arc<AuthManager>) -> Self {
+        self.auth_manager = am;
+        self
+    }
+
+    pub fn with_tls(mut self, acceptor: tokio_rustls::TlsAcceptor) -> Self {
+        self.tls_acceptor = Some(Arc::new(acceptor));
+        self
     }
 
     pub fn with_data_dir(mut self, data_dir: PathBuf) -> Self {
@@ -124,9 +142,15 @@ impl Server {
         let disk_cache    = self.disk_cache_rows;
         let trigger_store = self.trigger_store.clone();
         let api_store     = self.api_store.clone();
+        let auth_manager  = self.auth_manager.clone();
+        let tls_acceptor  = self.tls_acceptor.clone();
+
+        if tls_acceptor.is_some() {
+            info!("TLS enabled — connections will be encrypted");
+        }
 
         loop {
-            let (stream, peer) = listener
+            let (tcp, peer) = listener
                 .accept()
                 .await
                 .map_err(|e| FlowError::Io(format!("accept error: {e}")))?;
@@ -141,9 +165,24 @@ impl Server {
             let rm_c   = repl_mgr.clone();
             let ts_c   = trigger_store.clone();
             let as_c   = api_store.clone();
+            let am_c   = auth_manager.clone();
+            let tls_c  = tls_acceptor.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = handle_connection(stream, db_c, wal_c, met_c, dir_c, wr_c, cr_c, rm_c, storage_mode, disk_cache, ts_c, as_c, peer).await {
+                let result = if let Some(acceptor) = tls_c {
+                    match acceptor.accept(tcp).await {
+                        Ok(tls_stream) => {
+                            handle_connection(tls_stream, db_c, wal_c, met_c, dir_c, wr_c, cr_c, rm_c, storage_mode, disk_cache, ts_c, as_c, am_c, peer).await
+                        }
+                        Err(e) => {
+                            warn!("TLS handshake failed from {peer}: {e}");
+                            return;
+                        }
+                    }
+                } else {
+                    handle_connection(tcp, db_c, wal_c, met_c, dir_c, wr_c, cr_c, rm_c, storage_mode, disk_cache, ts_c, as_c, am_c, peer).await
+                };
+                if let Err(e) = result {
                     warn!("connection {peer} error: {e}");
                 }
                 info!("connection {peer} closed");
@@ -161,8 +200,8 @@ fn is_write_stmt(stmt: &Stmt) -> bool {
     )
 }
 
-async fn handle_connection(
-    stream: TcpStream,
+async fn handle_connection<S>(
+    stream: S,
     db: Arc<Database>,
     wal: Arc<WalWriter>,
     metrics: Arc<Metrics>,
@@ -174,9 +213,13 @@ async fn handle_connection(
     disk_cache_rows: usize,
     trigger_store: Arc<TriggerStore>,
     api_store: Arc<ApiStore>,
+    auth_manager: Arc<AuthManager>,
     _peer: SocketAddr,
-) -> Result<(), FlowError> {
-    let (reader, writer) = stream.into_split();
+) -> Result<(), FlowError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (reader, writer) = tokio::io::split(stream);
     let mut lines = BufReader::new(reader).lines();
 
     // All writes go through a channel so both the main loop and watcher
@@ -200,6 +243,7 @@ async fn handle_connection(
             exec.cluster_registry = cluster_registry;
             exec.trigger_store = trigger_store;
             exec.api_store = api_store;
+            exec.auth_manager = Some(Arc::clone(&auth_manager));
             Arc::new(exec)
         }
         None => {
@@ -210,6 +254,7 @@ async fn handle_connection(
             exec.cluster_registry = cluster_registry;
             exec.trigger_store = trigger_store;
             exec.api_store = api_store;
+            exec.auth_manager = Some(Arc::clone(&auth_manager));
             Arc::new(exec)
         }
     };

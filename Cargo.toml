@@ -46,8 +46,18 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # CLI argument parsing (for server flags)
 clap = { version = "4", features = ["derive"] }
 
-# Cryptographic hashing (auth password storage)
-sha2 = "0.10"
+# Password hashing — memory-hard, GPU-resistant (replaces SHA-256)
+argon2 = { version = "0.5", features = ["password-hash"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+# TLS — encrypted transport for client/server and REST API
+tokio-rustls = "0.25"
+rustls-pemfile = "2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "0.26"   # for REPL TLS: system trust roots
+
+# WAL encryption — AES-256-GCM at-rest encryption
+aes-gcm = "0.10"
 
 # Windows Service support (only compiled on Windows)
 [target.'cfg(windows)'.dependencies]

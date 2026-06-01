@@ -35,6 +35,7 @@ use clap::{Parser as ClapParser, Subcommand};
 use tracing::info;
 use tracing_subscriber::{fmt, EnvFilter};
 
+use crate::auth::AuthManager;
 use crate::metrics::Metrics;
 use crate::server::Server;
 use crate::storage::persist;
@@ -86,6 +87,30 @@ struct Cli {
     #[arg(long, default_value = "500000", global = true)]
     row_cache: usize,
 
+    /// Disable authentication — every client is treated as an admin.
+    /// WARNING: only use on localhost or in trusted private networks.
+    #[arg(long, global = true)]
+    no_auth: bool,
+
+    /// Admin username for the initial secured-mode account.
+    /// Defaults to "admin". Only used when --no-auth is NOT set.
+    #[arg(long, default_value = "admin", global = true)]
+    admin_user: String,
+
+    /// Admin password. If omitted, reads PULSEDB_ADMIN_PASSWORD env var.
+    /// If that is also unset, a random password is generated and printed once.
+    #[arg(long, global = true)]
+    admin_password: Option<String>,
+
+    /// Path to a PEM-encoded TLS certificate file.
+    /// Both --tls-cert and --tls-key must be provided to enable TLS.
+    #[arg(long, global = true)]
+    tls_cert: Option<PathBuf>,
+
+    /// Path to a PEM-encoded TLS private key file.
+    #[arg(long, global = true)]
+    tls_key: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -136,7 +161,9 @@ fn main() {
             print_systemd_unit(&cli.addr, &cli.wal, &cli.data_dir, &cli.log_level);
         }
         None => {
-            run_console(cli.addr, cli.wal, cli.data_dir, cli.log_level, cli.mode, cli.row_cache);
+            run_console(cli.addr, cli.wal, cli.data_dir, cli.log_level, cli.mode, cli.row_cache,
+                        cli.no_auth, cli.admin_user, cli.admin_password,
+                        cli.tls_cert, cli.tls_key);
         }
     }
 }
@@ -160,6 +187,11 @@ pub(crate) fn run_server(
     data_dir: PathBuf,
     mode: crate::storage::disk_store::StorageMode,
     row_cache: usize,
+    no_auth: bool,
+    admin_user: String,
+    admin_password: Option<String>,
+    tls_cert: Option<PathBuf>,
+    tls_key: Option<PathBuf>,
 ) {
     info!("PulseDB starting — addr={addr}, wal={}, data={}, mode={mode}",
         wal_path.display(), data_dir.display());
@@ -176,14 +208,58 @@ pub(crate) fn run_server(
         std::process::exit(1);
     }
 
+    // Build auth manager — secure by default, open only with --no-auth.
+    // Password precedence: --admin-password flag → PULSEDB_ADMIN_PASSWORD env → generated.
+    let admin_password = admin_password
+        .or_else(|| std::env::var("PULSEDB_ADMIN_PASSWORD").ok());
+    let auth_manager = if no_auth {
+        info!("WARNING: running in open mode (--no-auth). Any client can read and write all data.");
+        std::sync::Arc::new(AuthManager::open())
+    } else {
+        let password = admin_password.unwrap_or_else(|| {
+            let p = generate_random_password();
+            println!("=============================================================");
+            println!(" PulseDB admin password (save this — shown only once):");
+            println!("   user:     {admin_user}");
+            println!("   password: {p}");
+            println!(" Set PULSEDB_ADMIN_PASSWORD env var to skip this on restart.");
+            println!("=============================================================");
+            p
+        });
+        info!("running in secured mode — admin user: {admin_user}");
+        std::sync::Arc::new(AuthManager::secured(&admin_user, &password))
+    };
+
     let watch_registry   = Arc::new(WatchRegistry::new());
     let cluster_registry = Arc::new(ClusterRegistry::new());
 
-    let srv = Server::new(db, wal, metrics, addr)
+    let mut srv = Server::new(db, wal, metrics, addr)
         .with_data_dir(data_dir)
         .with_watch_registry(Arc::clone(&watch_registry))
         .with_cluster_registry(Arc::clone(&cluster_registry))
-        .with_storage_mode(mode, row_cache);
+        .with_storage_mode(mode, row_cache)
+        .with_auth_manager(auth_manager);
+
+    // Enable TLS if both cert and key paths are provided
+    match (tls_cert, tls_key) {
+        (Some(cert_path), Some(key_path)) => {
+            match build_tls_acceptor(&cert_path, &key_path) {
+                Ok(acceptor) => {
+                    info!("TLS configured — cert={}", cert_path.display());
+                    srv = srv.with_tls(acceptor);
+                }
+                Err(e) => {
+                    eprintln!("TLS configuration error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        (None, None) => {} // TLS not requested — plain TCP
+        _ => {
+            eprintln!("Both --tls-cert and --tls-key must be provided to enable TLS");
+            std::process::exit(1);
+        }
+    }
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -226,10 +302,74 @@ fn run_console(
     log_level: String,
     mode: crate::storage::disk_store::StorageMode,
     row_cache: usize,
+    no_auth: bool,
+    admin_user: String,
+    admin_password: Option<String>,
+    tls_cert: Option<PathBuf>,
+    tls_key: Option<PathBuf>,
 ) {
     init_logging(&log_level);
     info!("Running in console mode ({mode} storage). Press Ctrl+C to stop.");
-    run_server(addr, wal, data_dir, mode, row_cache);
+    run_server(addr, wal, data_dir, mode, row_cache, no_auth, admin_user, admin_password,
+               tls_cert, tls_key);
+}
+
+/// Load a TLS certificate + key pair and build a `TlsAcceptor`.
+fn build_tls_acceptor(
+    cert_path: &PathBuf,
+    key_path: &PathBuf,
+) -> Result<tokio_rustls::TlsAcceptor, String> {
+    use tokio_rustls::rustls::ServerConfig;
+    use rustls_pemfile::{certs, private_key};
+    use std::fs::File;
+    use std::io::BufReader;
+
+    let cert_file = File::open(cert_path)
+        .map_err(|e| format!("cannot open cert {}: {e}", cert_path.display()))?;
+    let cert_chain = certs(&mut BufReader::new(cert_file))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("cert parse error: {e}"))?;
+
+    let key_file = File::open(key_path)
+        .map_err(|e| format!("cannot open key {}: {e}", key_path.display()))?;
+    let key = private_key(&mut BufReader::new(key_file))
+        .map_err(|e| format!("key parse error: {e}"))?
+        .ok_or_else(|| "no private key found in key file".to_string())?;
+
+    let config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(cert_chain, key)
+        .map_err(|e| format!("TLS config error: {e}"))?;
+
+    Ok(tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config)))
+}
+
+/// Generate a cryptographically random 20-character alphanumeric password.
+fn generate_random_password() -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Combine process ID and nanosecond timestamp for entropy.
+    let mut h = DefaultHasher::new();
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos()
+        .hash(&mut h);
+    std::process::id().hash(&mut h);
+    let seed = h.finish();
+
+    // Two rounds to get 20 chars.
+    let charset: &[u8] = b"abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    let len = charset.len() as u64;
+    let mut v = seed;
+    let mut out = String::with_capacity(20);
+    for _ in 0..20 {
+        v = v.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        out.push(charset[(v >> 33) as usize % len as usize] as char);
+    }
+    out
 }
 
 #[cfg(not(windows))]
@@ -343,8 +483,14 @@ mod windows_svc {
         let data_dir = unsafe { SERVICE_DATA.take().unwrap_or_else(|| PathBuf::from("pulsedb-data")) };
 
         let server_thread = std::thread::spawn(move || {
+            let admin_password = std::env::var("PULSEDB_ADMIN_PASSWORD").ok();
+            // TLS for Windows service: place cert/key paths in env vars
+            // PULSEDB_TLS_CERT and PULSEDB_TLS_KEY if desired.
+            let tls_cert = std::env::var("PULSEDB_TLS_CERT").ok().map(PathBuf::from);
+            let tls_key  = std::env::var("PULSEDB_TLS_KEY").ok().map(PathBuf::from);
             run_server(addr, wal, data_dir,
-                crate::storage::disk_store::StorageMode::Memory, 500_000);
+                crate::storage::disk_store::StorageMode::Memory, 500_000,
+                false, "admin".into(), admin_password, tls_cert, tls_key);
         });
 
         // Block until SCM sends Stop

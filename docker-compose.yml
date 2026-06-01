@@ -3,15 +3,18 @@ services:
   pulsedb:
     image: pulsedb/pulsedb:latest
     build: .
-    ports:
-      - "7878:7878"
+    # SECURITY: use 'expose' (internal only) instead of 'ports' (host-bound).
+    # Expose makes the port reachable only to other containers on the same
+    # Docker network — never to the host or the internet.
+    # To allow host access during development, add: ports: ["127.0.0.1:7878:7878"]
+    expose:
+      - "7878"
     volumes:
-      # Named volume keeps data across container restarts.
-      # To use a host path instead: ./data:/var/lib/pulsedb
-      - pulsedb-data:/var/lib/pulsedb
-    environment:
-      # Tune log verbosity: trace | debug | info | warn | error
-      PULSEDB_LOG_LEVEL: info
+      # Data volume: only this path needs write access.
+      - pulsedb-data:/var/lib/pulsedb:rw
+    # SECURITY: load sensitive env vars from .env (never commit that file).
+    # Copy .env.example to .env and fill in values before running.
+    env_file: .env
     command:
       - pulsedb-server
       - --addr
@@ -21,6 +24,18 @@ services:
       - --log-level
       - "${PULSEDB_LOG_LEVEL:-info}"
     restart: unless-stopped
+    # SECURITY: harden the container runtime.
+    read_only: true          # root filesystem is read-only
+    tmpfs:
+      - /tmp                 # in-memory scratch space for runtime temp files
+    cap_drop:
+      - ALL                  # drop all Linux capabilities
+    cap_add:
+      - NET_BIND_SERVICE     # re-add only what the server needs to bind a port
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - internal
     healthcheck:
       test: ["CMD", "sh", "-c",
              "echo '{\"query\":\"SHOW TABLES\"}' | nc -q1 127.0.0.1 7878 | grep -q status"]
@@ -35,11 +50,12 @@ services:
   # pulsedb-node1:
   #   image: pulsedb/pulsedb:latest
   #   build: .
-  #   ports:
-  #     - "7878:7878"
-  #     - "7879:7879"    # Raft replication port
+  #   expose:
+  #     - "7878"
+  #     - "7879"    # Raft replication port
   #   volumes:
-  #     - pulsedb-node1:/var/lib/pulsedb
+  #     - pulsedb-node1:/var/lib/pulsedb:rw
+  #   env_file: .env
   #   command:
   #     - pulsedb-server
   #     - --addr
@@ -47,38 +63,49 @@ services:
   #     - --data-dir
   #     - /var/lib/pulsedb
   #   restart: unless-stopped
+  #   read_only: true
+  #   tmpfs: [/tmp]
+  #   cap_drop: [ALL]
+  #   cap_add: [NET_BIND_SERVICE]
+  #   security_opt: ["no-new-privileges:true"]
+  #   networks: [internal]
   #
   # pulsedb-node2:
   #   image: pulsedb/pulsedb:latest
   #   build: .
-  #   ports:
-  #     - "7880:7878"
-  #     - "7881:7879"
+  #   expose: ["7878", "7879"]
   #   volumes:
-  #     - pulsedb-node2:/var/lib/pulsedb
-  #   command:
-  #     - pulsedb-server
-  #     - --addr
-  #     - "0.0.0.0:7878"
-  #     - --data-dir
-  #     - /var/lib/pulsedb
+  #     - pulsedb-node2:/var/lib/pulsedb:rw
+  #   env_file: .env
+  #   command: [pulsedb-server, --addr, "0.0.0.0:7878", --data-dir, /var/lib/pulsedb]
   #   restart: unless-stopped
+  #   read_only: true
+  #   tmpfs: [/tmp]
+  #   cap_drop: [ALL]
+  #   cap_add: [NET_BIND_SERVICE]
+  #   security_opt: ["no-new-privileges:true"]
+  #   networks: [internal]
   #
   # pulsedb-node3:
   #   image: pulsedb/pulsedb:latest
   #   build: .
-  #   ports:
-  #     - "7882:7878"
-  #     - "7883:7879"
+  #   expose: ["7878", "7879"]
   #   volumes:
-  #     - pulsedb-node3:/var/lib/pulsedb
-  #   command:
-  #     - pulsedb-server
-  #     - --addr
-  #     - "0.0.0.0:7878"
-  #     - --data-dir
-  #     - /var/lib/pulsedb
+  #     - pulsedb-node3:/var/lib/pulsedb:rw
+  #   env_file: .env
+  #   command: [pulsedb-server, --addr, "0.0.0.0:7878", --data-dir, /var/lib/pulsedb]
   #   restart: unless-stopped
+  #   read_only: true
+  #   tmpfs: [/tmp]
+  #   cap_drop: [ALL]
+  #   cap_add: [NET_BIND_SERVICE]
+  #   security_opt: ["no-new-privileges:true"]
+  #   networks: [internal]
+
+networks:
+  internal:
+    driver: bridge
+    internal: true   # no internet access from this network
 
 volumes:
   pulsedb-data:
