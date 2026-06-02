@@ -1,6 +1,6 @@
 <?xml version='1.0' encoding='windows-1252'?>
 <!--
-  PulseDB v0.2.0 WiX Installer Definition
+  PulseDB v1.0.0 WiX Installer Definition
   Product:    PulseDB - PulseQL Database Engine
   Licensor:   Ajaikumar, ForNexus (https://fornexus.tech)
   License:    Business Source License 1.1  (BUSL-1.1)
@@ -26,7 +26,7 @@
 
         <Package Id='*'
             Keywords='Installer'
-            Description='PulseDB v0.2.0 - High-performance database engine with PulseQL query language'
+            Description='PulseDB v1.0.0 - High-performance database engine with PulseQL query language'
             Manufacturer='Ajaikumar, ForNexus'
             InstallerVersion='450'
             Languages='1033'

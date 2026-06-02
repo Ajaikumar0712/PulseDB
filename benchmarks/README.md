@@ -1,167 +1,212 @@
-# PulseDB Benchmarks
+# PulseDB Benchmark Suite
 
-Performance measurements comparing PulseDB against Redis 7 and SQLite 3.
-All numbers are **median of 3 runs** on a reference machine.
-
-> **Reference hardware:** AMD Ryzen 9 5900X (12-core), 32 GB DDR4-3200, NVMe SSD,
-> Windows 11 / Ubuntu 22.04 (Linux numbers shown).
-> PulseDB v0.2.0 release build (`cargo build --release`).
+End-to-end performance benchmarks comparing PulseDB against **PostgreSQL**, **MongoDB**, **Redis**, and **Qdrant**. All latency numbers are measured against real running database instances.
 
 ---
 
-## How to reproduce
+## What is measured
+
+| Benchmark | Description | Scale |
+| --- | --- | --- |
+| **INSERT** | Bulk row insertion (single + batched transactions) | 1K → 1M rows |
+| **POINT LOOKUP** | Fetch one row by primary key (indexed) | p50 / p95 / p99 |
+| **RANGE SCAN** | Fetch 10% of the dataset by ID range | rows/sec |
+| **FULL SCAN** | Table scan with a float filter (no index) | rows/sec |
+| **AGGREGATION** | GROUP BY + COUNT + AVG | rows/sec |
+| **ORDER BY LIMIT** | Top-100 sorted by float column | ops/sec |
+| **FUZZY SEARCH** | Trigram / regex text similarity search | ops/sec |
+| **VECTOR SEARCH** | k-NN cosine similarity (128-dim HNSW) | ops/sec |
+| **CONCURRENT TPS** | N simultaneous clients, point lookups | TPS + latency |
+
+---
+
+## Quick start
+
+### 1 — Install Python dependencies
 
 ```bash
-# PulseDB (Criterion — HTML report in target/criterion/)
+pip install psycopg2-binary pymongo redis qdrant-client
+```
+
+### 2 — Start the databases
+
+```bash
+# PulseDB (required)
+.\target\release\pulsedb-server.exe --no-auth
+
+# PostgreSQL (optional — skip with --dbs pulsedb redis)
+docker run -d -p 5432:5432 -e POSTGRES_PASSWORD=postgres postgres:16
+
+# MongoDB (optional)
+docker run -d -p 27017:27017 mongo:7
+
+# Redis (optional)
+docker run -d -p 6379:6379 redis:7
+
+# Qdrant (optional — vector search only)
+docker run -d -p 6333:6333 qdrant/qdrant
+```
+
+### 3 — Run benchmarks
+
+```bash
+cd benchmarks
+
+# Quick run — all databases, 100K rows, 100 concurrent clients
+python run_all.py
+
+# Full run — 1M rows, 1000 concurrent clients
+python run_all.py --rows 1000000 --concurrency 1000
+
+# 10M row test (takes ~30-60 min depending on hardware)
+python run_all.py --rows 10000000 --concurrency 1000
+
+# Only PulseDB (no other databases needed)
+python run_all.py --dbs pulsedb
+
+# Skip databases that aren't running
+python run_all.py --skip-errors
+
+# Vector search comparison (PulseDB vs Qdrant only)
+python run_all.py --dbs pulsedb qdrant --vec-rows 100000
+```
+
+### 4 — Run Rust internal benchmarks (PulseDB only)
+
+```bash
+# All groups
 cargo bench
 
-# SQLite (Python stdlib, no external deps)
-python benchmarks/compare/sqlite_bench.py --rows 100000
+# Specific group
+cargo bench -- insert
+cargo bench -- vector_search
+cargo bench -- mixed_80r_20w
 
-# Redis (requires redis-py and a running Redis instance)
-pip install redis
-redis-server &
-python benchmarks/compare/redis_bench.py --rows 100000
+# Save a baseline and compare later
+cargo bench -- --save-baseline main
+# ...make changes...
+cargo bench -- --baseline main
+
+# HTML report
+start target/criterion/report/index.html
 ```
 
 ---
 
-## Results
+## Individual database scripts
 
-### INSERT throughput
+You can run each database's benchmark independently:
 
-| Database | 10 K rows | 100 K rows | 1 M rows |
-|---|---|---|---|
-| **PulseDB (no index)** | **2,800 ms → 3.6 M rows/s** | **2.1 M rows/s** | **1.9 M rows/s** |
-| **PulseDB (with index)** | **1.8 M rows/s** | **1.4 M rows/s** | **1.1 M rows/s** |
-| Redis (HSET pipeline) | 890 K rows/s | 830 K rows/s | 810 K rows/s |
-| SQLite (WAL, no index) | 540 K rows/s | 510 K rows/s | 490 K rows/s |
-| SQLite (WAL, indexed) | 310 K rows/s | 290 K rows/s | 270 K rows/s |
+```bash
+cd benchmarks/compare
 
-PulseDB's in-memory B-tree insert is **2–4× faster than Redis** (no network hop)
-and **4–7× faster than SQLite** (no disk I/O in memory mode).
+# PulseDB
+python pulsedb_bench.py --rows 1000000 --concurrency 500
 
----
+# PostgreSQL
+PGPASSWORD=postgres python postgres_bench.py --rows 1000000 --concurrency 100
 
-### Point lookup (indexed)
+# MongoDB
+python mongodb_bench.py --rows 1000000 --concurrency 100
 
-| Database | 10 K rows | 100 K rows | Notes |
-|---|---|---|---|
-| **PulseDB (B-tree index)** | **0.011 ms** | **0.013 ms** | O(log n) |
-| Redis (HGETALL) | 0.08 ms | 0.08 ms | Network RTT dominates |
-| SQLite (indexed SELECT) | 0.032 ms | 0.035 ms | Disk page cache |
+# Redis
+python redis_bench.py --rows 1000000 --concurrency 1000
 
-PulseDB's indexed lookup is sub-microsecond for local queries (no TCP overhead).
+# Qdrant (vector search focused)
+python qdrant_bench.py --rows 100000 --dims 128 --concurrency 50
+```
 
 ---
 
-### Range scan (10% selectivity, indexed)
+## Environment variables
 
-| Database | 10 K rows | 100 K rows |
-|---|---|---|
-| **PulseDB (B-tree range)** | **0.18 ms** | **1.4 ms** |
-| Redis (no native range on hash fields — SCAN required) | 42 ms | 430 ms |
-| SQLite (indexed range) | 0.31 ms | 2.9 ms |
-
-Redis has **no native secondary index** — range queries require a full SCAN.
-PulseDB and SQLite both use B-tree indexes and are within 2× of each other.
-
----
-
-### Full table scan with filter
-
-| Database | 10 K rows | 50 K rows |
-|---|---|---|
-| **PulseDB** | **1.2 ms** | **6.1 ms** |
-| Redis (SCAN + HGETALL + client filter) | 28 ms | 140 ms |
-| SQLite | 2.1 ms | 11 ms |
-
-PulseDB scans in-memory rows roughly **2× faster than SQLite** (no disk page
-deserialization). Redis pays heavily for per-key network round-trips.
+| Variable | Default | Used by |
+| --- | --- | --- |
+| `PULSEDB_HOST` | `127.0.0.1` | pulsedb_bench |
+| `PULSEDB_PORT` | `7878` | pulsedb_bench |
+| `PGHOST` | `127.0.0.1` | postgres_bench |
+| `PGPORT` | `5432` | postgres_bench |
+| `PGDATABASE` | `benchmark` | postgres_bench |
+| `PGUSER` | `postgres` | postgres_bench |
+| `PGPASSWORD` | `postgres` | postgres_bench |
+| `MONGO_URI` | `mongodb://localhost:27017` | mongodb_bench |
+| `REDIS_HOST` | `127.0.0.1` | redis_bench |
+| `REDIS_PORT` | `6379` | redis_bench |
+| `QDRANT_HOST` | `localhost` | qdrant_bench |
+| `QDRANT_PORT` | `6333` | qdrant_bench |
 
 ---
 
-### Fuzzy text search (trigram)
+## Output
 
-PulseDB's `FIND table WHERE col ~ "query"` uses trigram similarity — there is
-**no direct equivalent in Redis or SQLite** without extensions.
+Each run produces:
 
-| Database | 10 K rows | Notes |
-|---|---|---|
-| **PulseDB (trigram)** | **4.2 ms** | Built-in, no config |
-| SQLite (LIKE '%...%') | 3.8 ms | No trigram — worst-case false positive rate |
-| Redis | N/A | Requires RediSearch module |
+- Per-database JSON files in `results/` (e.g. `results/pulsedb_results.json`)
+- A cross-database `results/comparison.json` when multiple databases are benchmarked
+- A printed ASCII comparison table
 
-SQLite's `LIKE` scan is slightly faster but gives no similarity score and
-has higher false-positive rates on partial matches.
+```text
+══════════════════════════════════════════════════════════
+  CROSS-DATABASE COMPARISON — 100,000 rows
+  TPS = operations per second   p50/p99 = latency (ms)
+══════════════════════════════════════════════════════════
+Operation              PulseDB   PostgreSQL   MongoDB   Redis
+─────────────────────────────────────────────────────────
+INSERT                 125,000       80,000    95,000   450,000 TPS
+POINT LOOKUP           280,000      180,000   120,000   800,000 TPS
+RANGE SCAN              45,000       90,000    60,000       N/A TPS
+FULL SCAN               30,000       50,000    40,000       N/A TPS
+AGGREGATION             18,000       25,000    22,000       N/A TPS
+VECTOR SEARCH (HNSW)    12,000          N/A       N/A    14,000 TPS
+FUZZY SEARCH             8,000       15,000     5,000       N/A TPS
+CONCURRENT 100          95,000      140,000    85,000   600,000 TPS
+```
 
----
-
-### Vector similarity search (HNSW vs linear)
-
-PulseDB provides `SIMILAR table TO [vec] LIMIT k` with an HNSW index.
-
-| Dataset size | HNSW (dim=4) | Linear scan | Speedup |
-|---|---|---|---|
-| 500 vectors | 0.04 ms | 0.18 ms | 4.5× |
-| 2 000 vectors | 0.06 ms | 0.72 ms | 12× |
-| 10 000 vectors | 0.09 ms | 3.6 ms | 40× |
-
-HNSW scales as O(log n) vs O(n) for linear scan — the gap grows with dataset size.
-Neither Redis (without RediSearch) nor SQLite offer approximate nearest-neighbor
-search natively.
+> Numbers above are illustrative — run the benchmarks on your hardware for accurate results.
 
 ---
 
-### Aggregation (GROUP BY)
+## Rust Criterion benchmarks
 
-| Database | 10 K rows | 50 K rows |
-|---|---|---|
-| **PulseDB** | **0.8 ms** | **4.1 ms** |
-| SQLite | 1.4 ms | 7.2 ms |
-| Redis | N/A (manual client aggregation) | — |
+The `benches/pulseql.rs` file covers PulseDB's internal performance with 12 benchmark groups:
 
-PulseDB aggregates in-memory without page I/O, running ~1.75× faster than SQLite.
-
----
-
-### Transaction throughput (BEGIN / N inserts / COMMIT)
-
-| Ops per tx | PulseDB | SQLite WAL | Redis MULTI/EXEC |
-|---|---|---|---|
-| 1 | 0.09 ms | 0.18 ms | 0.12 ms |
-| 10 | 0.31 ms | 0.42 ms | 0.19 ms |
-| 100 | 2.8 ms | 4.1 ms | 1.2 ms |
-
-PulseDB MVCC transactions match SQLite for small tx sizes and stay competitive
-at large batch sizes. Redis MULTI/EXEC has lower overhead per key because it
-has no snapshot isolation or WAL writes.
+| Group | What it measures |
+| --- | --- |
+| `insert` | Row insert throughput: 1K, 10K, 100K, 500K, 1M |
+| `point_lookup` | Single-row GET by id: dataset 10K / 100K / 1M |
+| `range_scan` | Range GET (10% of dataset): 10K / 100K / 1M |
+| `full_scan` | Full table scan with float filter: 10K / 100K / 500K |
+| `aggregation` | GROUP BY + COUNT + AVG: 10K / 100K / 500K |
+| `order_limit` | ORDER BY score DESC LIMIT 100: 10K / 100K / 500K |
+| `fuzzy_search` | Trigram ~ operator: 10K / 100K |
+| `vector_search` | HNSW 128-dim cosine k=10: 1K / 10K / 50K |
+| `transaction` | BEGIN + N writes + COMMIT: 1 / 10 / 50 / 100 ops/tx |
+| `parser` | Lex + parse only (8 query types) |
+| `mixed_80r_20w` | 80% reads / 20% writes: 10K / 100K |
+| `delete` | DEL WHERE active = false (~50% of rows): 1K / 10K / 100K |
 
 ---
 
-## Key takeaways
+## Reference hardware
 
-| Workload | Best choice |
-|---|---|
-| Pure key-value, network client | Redis |
-| Embedded SQL, disk durability | SQLite |
-| **In-process, rich queries + vector search** | **PulseDB** |
-| **Fuzzy text search built-in** | **PulseDB** |
-| **Streaming subscriptions (WATCH)** | **PulseDB** |
+Document your hardware when sharing benchmark numbers:
 
-PulseDB's primary advantage is **depth of query features at in-memory speeds**:
-vector similarity, fuzzy text, streaming subscriptions, and full ACID
-transactions — none of which are available in Redis or SQLite without
-significant additional infrastructure.
+```text
+CPU:    AMD Ryzen 9 5900X / Intel Core i9-13900K
+RAM:    32 GB DDR4-3200
+Disk:   NVMe SSD (for disk-mode tests)
+OS:     Windows 11 / Ubuntu 22.04
+Rust:   1.78+ (release profile, LTO enabled)
+Python: 3.11+
+```
 
 ---
 
-## Benchmark methodology
+## Fairness notes
 
-- All PulseDB benchmarks use **Criterion.rs** (statistical, outlier-aware).
-- SQLite uses Python's stdlib `sqlite3` module (C extension, same engine as prod).
-- Redis uses `redis-py` in pipeline mode where applicable.
-- In-memory mode only (no disk mode overhead) unless noted.
-- Results vary ±15% by hardware; the relative ordering is stable.
-- PulseDB disk mode (`--mode disk`) trades ~30% insert throughput for
-  WAL fsync durability (similar trade-off to SQLite WAL mode vs. `PRAGMA synchronous=FULL`).
+- All databases are tested **in-memory** where possible (PostgreSQL `shared_buffers`, MongoDB WiredTiger cache, Redis is always in-memory, PulseDB default memory mode)
+- Each benchmark opens **fresh connections** — no persistent connection reuse unless the DB client requires it
+- Averages are **median of 5+ runs**, first call is discarded as warm-up
+- Concurrent tests use a **barrier** so all threads start simultaneously
+- PulseDB advantages: no disk I/O, integrated vector/fuzzy search, no ORM overhead
+- PulseDB limitations: single-process, no horizontal sharding in v0.2, WAL-only durability

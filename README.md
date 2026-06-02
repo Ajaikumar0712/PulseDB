@@ -2,9 +2,9 @@
 
 > **A high-performance database engine built in Rust with its own query language — PulseQL.**
 
-[![Version](https://img.shields.io/badge/version-0.2.0-blue)](https://github.com/Ajaikumar0712/PulseDB)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue)](https://github.com/Ajaikumar0712/PulseDB)
 [![License](https://img.shields.io/badge/license-BUSL--1.1-orange)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)](https://github.com/Ajaikumar0712/PulseDB/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20Docker-lightgrey)](https://github.com/Ajaikumar0712/PulseDB/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange)](https://www.rust-lang.org)
 
 PulseDB is a self-contained, production-ready database engine that stores data in-memory with WAL-backed durability, communicates over TCP using JSON, and is queried with **PulseQL** — a purpose-built, SQL-inspired query language.
@@ -16,7 +16,7 @@ PulseDB is a self-contained, production-ready database engine that stores data i
 ## At a Glance
 
 | Feature | Description |
-|---|---|
+| --- | --- |
 | **PulseQL** | Custom query language — clean, readable, not SQL |
 | **In-memory + WAL** | Fast reads/writes with Write-Ahead Log durability |
 | **Joins** | INNER, LEFT, RIGHT joins across tables in one query |
@@ -25,17 +25,23 @@ PulseDB is a self-contained, production-ready database engine that stores data i
 | **Vector Search** | Cosine similarity search with HNSW index (`SIMILAR`) |
 | **Streaming** | Real-time push subscriptions with `WATCH` |
 | **Transactions** | `BEGIN` / `COMMIT` / `ROLLBACK` with MVCC isolation |
-| **Security** | Users, Argon2id passwords, roles, per-table permissions |
+| **Security** | Argon2id passwords, per-user RBAC, auth required by default |
 | **TLS** | Encrypted transport via `--tls-cert` / `--tls-key`; REPL `--tls` flag |
-| **WAL Encryption** | AES-256-GCM at-rest encryption via `PULSEDB_WAL_KEY` env var |
-| **REST Rate Limiting** | 100 requests/second per IP; HTTP 429 on exceed |
-| **Clustering** | Peer heartbeats, Raft consensus, FNV-1a shard routing |
-| **REST API** | Auto-generated HTTP endpoint per table (`API GENERATE FOR`) with API key auth |
+| **WAL Encryption** | AES-256-GCM at-rest encryption via `PULSEDB_WAL_KEY` |
+| **REST API** | Auto-generated HTTP endpoints per table with API key auth |
+| **Rate Limiting** | 100 req/s per IP on REST endpoints; HTTP 429 on exceed |
+| **ORM** | Python, JavaScript/TypeScript, and Go ORMs in `clients/` |
+| **Migration** | `migrate.py` — import from PostgreSQL, MySQL, SQLite, MongoDB |
+| **Clustering** | Raft consensus, peer heartbeats, FNV-1a shard routing |
+| **Triggers** | Event-driven PulseQL queries (admin-only, depth-limited) |
+| **Graph Queries** | `GRAPH MATCH` — node-edge-node traversal across three tables |
+| **Time Travel** | `AS OF` / `VERSION` historical snapshots |
+| **AI Search** | Hash-based lexical search (`AI SEARCH`) |
 | **Windows Service** | Runs as a background service that starts with Windows |
-| **Linux / systemd** | Prints a ready-to-use systemd unit file (`systemd-unit`) |
-| **Docker** | Official multi-stage image — single node or 3-node cluster |
+| **Linux / systemd** | Ready-to-use systemd unit via `systemd-unit` subcommand |
+| **Docker** | Multi-stage image — single node or 3-node cluster |
 | **MSI Installer** | One-click install on Windows |
-| **Client SDKs** | Python, Go, and JavaScript clients included |
+| **Benchmarks** | Criterion (Rust) + Python comparison vs PostgreSQL, MongoDB, Redis, Qdrant |
 
 ---
 
@@ -43,35 +49,29 @@ PulseDB is a self-contained, production-ready database engine that stores data i
 
 ### 1 · Install
 
-Download **`pulsedb-0.2.0-x86_64.msi`** and double-click to install.
+Download **`pulsedb-1.0.0-x86_64.msi`** from the [releases page](https://github.com/Ajaikumar0712/PulseDB/releases) and double-click to install.
 
-This places `pulsedb-server.exe` and `pulsedb-repl.exe` in:
-```
-C:\Program Files\PulseDB\bin\
-```
-That folder is automatically added to your system `PATH`.
+Both binaries are placed in `C:\Program Files\PulseDB\bin\` and added to your system `PATH`.
 
 ### 2 · Start the Server
-
-Open **any terminal** and run:
 
 ```powershell
 pulsedb-server
 ```
 
-On first start, the server prints a generated admin password — **save it**:
+On first start a random admin password is generated — **save it**:
 
-```
+```text
 =============================================================
  PulseDB admin password (save this — shown only once):
    user:     admin
    password: xK7mQpRt9nVw3bYs2cZj
  Set PULSEDB_ADMIN_PASSWORD env var to skip this on restart.
 =============================================================
-[INFO] PulseDB 0.2.0 listening on 127.0.0.1:7878
+[INFO] PulseDB 1.0.0 listening on 127.0.0.1:7878
 ```
 
-On subsequent starts, set the env var so the password isn't regenerated:
+On every subsequent start supply the password via env var:
 
 ```powershell
 $env:PULSEDB_ADMIN_PASSWORD = "xK7mQpRt9nVw3bYs2cZj"
@@ -80,13 +80,9 @@ pulsedb-server
 
 ### 3 · Connect and Query
 
-Open a **second terminal** and run:
-
 ```powershell
 pulsedb-repl
 ```
-
-At the `pulseql>` prompt, authenticate first, then query:
 
 ```sql
 AUTH admin 'xK7mQpRt9nVw3bYs2cZj'
@@ -100,8 +96,6 @@ GET users
 GET users WHERE age >= 28 ORDER BY name ASC
 ```
 
-That's it — you're running PulseDB.
-
 ---
 
 ## Table of Contents
@@ -113,39 +107,46 @@ That's it — you're running PulseDB.
 2. [Running the Server](#running-the-server)
 3. [Windows Service](#windows-service)
 4. [Linux Service (systemd)](#linux-service-systemd)
-5. [TLS (Encrypted Transport)](#tls-encrypted-transport)
-6. [Connecting with the REPL](#connecting-with-the-repl)
-7. [Client SDKs](#client-sdks)
+5. [TLS — Encrypted Transport](#tls--encrypted-transport)
+6. [WAL Encryption — Data at Rest](#wal-encryption--data-at-rest)
+7. [Connecting with the REPL](#connecting-with-the-repl)
+8. [Client SDKs](#client-sdks)
    - [Python](#python)
    - [Go](#go)
    - [JavaScript](#javascript)
-8. [PulseQL Language Reference](#pulseql-language-reference)
-   - [Data Types](#data-types)
-   - [Table Management](#table-management)
-   - [Writing Data](#writing-data)
-   - [Reading Data](#reading-data)
-   - [Joins](#joins)
-   - [Aggregation & GROUP BY](#aggregation--group-by)
-   - [Fuzzy Search](#fuzzy-search)
-   - [Vector Similarity Search](#vector-similarity-search)
-   - [Streaming Watch Queries](#streaming-watch-queries)
-   - [Transactions](#transactions)
-   - [REST API](#rest-api)
-   - [Security & User Management](#security--user-management)
-   - [Cluster Commands](#cluster-commands)
-   - [Triggers](#triggers)
-   - [Graph Queries](#graph-queries)
-   - [Time Travel Queries](#time-travel-queries)
-   - [AI Search](#ai-search)
-   - [Admin Commands](#admin-commands)
-   - [Resource Configuration](#resource-configuration)
-9. [Expressions & Operators](#expressions--operators)
-10. [Response Format](#response-format)
-11. [Metrics](#metrics)
-12. [Architecture](#architecture)
-13. [Quick Reference Card](#quick-reference-card)
-14. [Troubleshooting](#troubleshooting)
-15. [License & Pricing](#license--pricing)
+9. [ORM](#orm)
+   - [Python ORM](#python-orm)
+   - [JavaScript ORM](#javascript-orm)
+   - [Go ORM](#go-orm)
+10. [Migration Tool](#migration-tool)
+11. [PulseQL Language Reference](#pulseql-language-reference)
+    - [Data Types](#data-types)
+    - [Table Management](#table-management)
+    - [Writing Data](#writing-data)
+    - [Reading Data](#reading-data)
+    - [Joins](#joins)
+    - [Aggregation & GROUP BY](#aggregation--group-by)
+    - [Fuzzy Search](#fuzzy-search)
+    - [Vector Similarity Search](#vector-similarity-search)
+    - [Streaming Watch Queries](#streaming-watch-queries)
+    - [Transactions](#transactions)
+    - [REST API](#rest-api)
+    - [Security & User Management](#security--user-management)
+    - [Cluster Commands](#cluster-commands)
+    - [Triggers](#triggers)
+    - [Graph Queries](#graph-queries)
+    - [Time Travel Queries](#time-travel-queries)
+    - [AI Search](#ai-search)
+    - [Admin Commands](#admin-commands)
+    - [Resource Configuration](#resource-configuration)
+12. [Expressions & Operators](#expressions--operators)
+13. [Response Format](#response-format)
+14. [Metrics](#metrics)
+15. [Benchmarks](#benchmarks)
+16. [Architecture](#architecture)
+17. [Quick Reference Card](#quick-reference-card)
+18. [Troubleshooting](#troubleshooting)
+19. [License & Pricing](#license--pricing)
 
 ---
 
@@ -153,16 +154,14 @@ That's it — you're running PulseDB.
 
 ### Option A — MSI Installer (Windows)
 
-1. Download `pulsedb-0.2.0-x86_64.msi` from the [releases page](https://github.com/Ajaikumar0712/PulseDB/releases)
+1. Download `pulsedb-1.0.0-x86_64.msi` from the [releases page](https://github.com/Ajaikumar0712/PulseDB/releases)
 2. Double-click and follow the installer wizard
 3. Accept the BUSL-1.1 license agreement
 4. Keep "Add to PATH" checked (recommended)
 5. Click **Install**
 
-**Installed files:**
-
 | File | Location |
-|---|---|
+| --- | --- |
 | `pulsedb-server.exe` | `C:\Program Files\PulseDB\bin\` |
 | `pulsedb-repl.exe` | `C:\Program Files\PulseDB\bin\` |
 | `LICENSE` | `C:\Program Files\PulseDB\` |
@@ -174,23 +173,18 @@ To uninstall: **Settings → Apps → PulseDB → Uninstall**
 
 ### Option B — Build from Source
 
-**Requirements:** Rust 1.70 or newer — install from [rustup.rs](https://rustup.rs)
+**Requirements:** Rust 1.70+ — install from [rustup.rs](https://rustup.rs)
 
 ```powershell
 git clone https://github.com/Ajaikumar0712/PulseDB
 cd PulseDB
 
-# Release build (optimised, recommended)
-cargo build --release
-
-# Run the test suite (104 tests)
-cargo test
+cargo build --release   # optimised build
+cargo test              # run the test suite
 ```
 
-Output binaries:
-
 | Binary | Path |
-|---|---|
+| --- | --- |
 | `pulsedb-server.exe` | `target\release\pulsedb-server.exe` |
 | `pulsedb-repl.exe` | `target\release\pulsedb-repl.exe` |
 
@@ -198,42 +192,32 @@ Output binaries:
 
 ### Option C — Docker
 
-No Rust toolchain required. Works on Linux, macOS, and Windows with Docker Desktop.
-
-**Before starting**, copy `.env.example` to `.env` and set your admin password:
-
 ```bash
 cp .env.example .env
-# Edit .env and set PULSEDB_ADMIN_PASSWORD=your-strong-password
-```
+# Edit .env → set PULSEDB_ADMIN_PASSWORD=your-strong-password
 
-```bash
-# Start (reads credentials from .env)
 docker compose up -d
-
-# Connect with the REPL (container shares the internal network)
 docker exec -it pulsedb pulsedb-repl
 ```
 
-The server binds to port 7878 on the internal Docker network only — not exposed to the host. To allow host access during development, add `ports: ["127.0.0.1:7878:7878"]` to `docker-compose.yml`. Data is persisted in a named Docker volume (`pulsedb-data`). To run a 3-node cluster, see the commented cluster section in `docker-compose.yml`.
+Port 7878 is on the **internal Docker network only** — not exposed to the host. To allow host access during development add `ports: ["127.0.0.1:7878:7878"]` to `docker-compose.yml`.
+
+Data persists in the named Docker volume `pulsedb-data`. A 3-node Raft cluster config is included (commented) in `docker-compose.yml`.
 
 ```bash
-# Build the image locally instead
 docker build -t pulsedb/pulsedb .
-docker run -p 7878:7878 -v pulsedb-data:/var/lib/pulsedb pulsedb/pulsedb
+docker run -p 127.0.0.1:7878:7878 -v pulsedb-data:/var/lib/pulsedb pulsedb/pulsedb
 ```
 
 ---
 
 ## Running the Server
 
-Start PulseDB in the foreground. Logs print to the terminal. Press `Ctrl+C` to stop.
-
 ```powershell
 pulsedb-server
 ```
 
-Default address: `127.0.0.1:7878`
+Default address: `127.0.0.1:7878`. Logs print as JSON. Press `Ctrl+C` to stop.
 
 ### Server Flags
 
@@ -242,366 +226,487 @@ Default address: `127.0.0.1:7878`
 | `--addr <HOST:PORT>` | `-a` | `127.0.0.1:7878` | Address and port to listen on |
 | `--wal <PATH>` | `-w` | `pulsedb.wal` | Path to the Write-Ahead Log file |
 | `--data-dir <PATH>` | `-d` | `pulsedb-data` | Directory for catalog and disk snapshots |
-| `--log-level <LEVEL>` | `-l` | `info` | Verbosity: `trace`, `debug`, `info`, `warn`, `error` |
+| `--log-level <LEVEL>` | `-l` | `info` | Verbosity: `trace` `debug` `info` `warn` `error` |
 | `--mode <MODE>` | | `memory` | Storage mode: `memory` or `disk` |
-| `--row-cache <N>` | | `500000` | Per-table in-memory row limit before disk eviction (disk mode only) |
-| `--admin-user <NAME>` | | `admin` | Username for the initial admin account |
-| `--admin-password <PWD>` | | *(generated)* | Admin password — also read from `PULSEDB_ADMIN_PASSWORD` env var |
-| `--no-auth` | | *(off)* | Disable authentication — every client is treated as admin (dev only) |
-| `--tls-cert <PATH>` | | *(off)* | Path to a PEM TLS certificate — enables TLS when combined with `--tls-key` |
-| `--tls-key <PATH>` | | *(off)* | Path to a PEM TLS private key |
+| `--row-cache <N>` | | `500000` | Per-table row limit before disk eviction (disk mode) |
+| `--admin-user <NAME>` | | `admin` | Username of the initial admin account |
+| `--admin-password <PWD>` | | *(auto-generated)* | Admin password — also read from `PULSEDB_ADMIN_PASSWORD` |
+| `--no-auth` | | *(off)* | Disable authentication (dev / localhost only) |
+| `--tls-cert <PATH>` | | *(off)* | PEM certificate — enables TLS when combined with `--tls-key` |
+| `--tls-key <PATH>` | | *(off)* | PEM private key |
 
 **Examples:**
 
 ```powershell
-# Use a fixed admin password (recommended for production)
 $env:PULSEDB_ADMIN_PASSWORD = "my-strong-password"
 pulsedb-server
 
-# Disable auth entirely (dev/localhost only)
-pulsedb-server --no-auth
-
-# Custom admin user name
-pulsedb-server --admin-user dbadmin --admin-password my-strong-password
-
-# Listen on all interfaces (for Docker / remote access)
-pulsedb-server --addr 0.0.0.0:7878
-
-# All flags combined
-pulsedb-server --addr 0.0.0.0:7878 --wal C:\data\pulsedb.wal --data-dir C:\data\pulsedb --mode disk --log-level info
+pulsedb-server --no-auth                               # local dev
+pulsedb-server --mode disk --row-cache 100000          # disk mode
+pulsedb-server --tls-cert cert.pem --tls-key key.pem  # TLS
+pulsedb-server --addr 0.0.0.0:7878                     # all interfaces
 ```
 
 ---
 
 ## Windows Service
 
-The Windows Service lets PulseDB run automatically in the background — it starts when Windows boots, with no terminal required.
-
-> **All service commands require an Administrator terminal.**
-> Right-click PowerShell → "Run as Administrator"
-
-### Setup Workflow
-
 ```powershell
-# 1. Register the service (only needed once)
-pulsedb-server install
-
-# 2. Start it
+pulsedb-server install    # register (run as Administrator)
 pulsedb-server start
-
-# 3. Connect from any terminal (no admin needed)
-pulsedb-repl
-
-# 4. Stop when finished
+pulsedb-repl              # connect from any terminal
 pulsedb-server stop
-
-# 5. Remove the service registration
 pulsedb-server uninstall
 ```
 
-You can also manage it from the Windows Services panel:
-`Win+R → services.msc → "PulseDB Database"`
+Manage via Services panel: `Win+R → services.msc → "PulseDB Database"`
 
-### Install with Custom Settings
-
-The address and WAL path you specify at install time are baked into the service:
-
-```powershell
-pulsedb-server --addr 0.0.0.0:7878 --wal C:\data\pulsedb.wal install
-```
-
-### Service Command Reference
-
-| Command | Description | Requires Admin |
-|---------|-------------|:--------------:|
-| `pulsedb-server install` | Register as a Windows Service | ✅ |
-| `pulsedb-server uninstall` | Remove the service registration | ✅ |
-| `pulsedb-server start` | Start the service | ✅ |
-| `pulsedb-server stop` | Stop the service | ✅ |
+| Command | Requires Admin |
+| --- | :-: |
+| `pulsedb-server install` | ✅ |
+| `pulsedb-server uninstall` | ✅ |
+| `pulsedb-server start` | ✅ |
+| `pulsedb-server stop` | ✅ |
 
 ---
 
 ## Linux Service (systemd)
 
-On Linux (and macOS), PulseDB can run as a systemd service. Use `systemd-unit` to print a ready-to-use unit file, then install it:
-
 ```bash
-# Print the unit file
-pulsedb-server --addr 0.0.0.0:7878 --data-dir /var/lib/pulsedb systemd-unit
-
-# Install it (requires root)
 pulsedb-server --addr 0.0.0.0:7878 --data-dir /var/lib/pulsedb systemd-unit \
   | sudo tee /etc/systemd/system/pulsedb.service
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now pulsedb
 
-# Connect from anywhere
 pulsedb-repl --addr 127.0.0.1:7878
 ```
 
-The generated unit file runs the server as a `pulsedb` system user with `Restart=on-failure`.
+The generated unit runs the server as a `pulsedb` system user with `Restart=on-failure`.
 
 ---
 
-## TLS (Encrypted Transport)
+## TLS — Encrypted Transport
 
-By default PulseDB speaks plain TCP. Enable TLS to encrypt all traffic between clients and the server — required for any deployment where the network isn't trusted (cloud VMs, remote access, non-localhost Docker).
-
-### Generate a self-signed certificate (development)
+Enable TLS to encrypt all traffic — required for any network that isn't localhost.
 
 ```bash
-openssl req -x509 -newkey rsa:4096 \
-  -keyout key.pem -out cert.pem \
-  -days 365 -nodes \
-  -subj "/CN=localhost"
-```
+# Generate a self-signed certificate (development)
+openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes -subj "/CN=localhost"
 
-### Start the server with TLS
-
-```powershell
+# Start server with TLS
 pulsedb-server --tls-cert cert.pem --tls-key key.pem
 ```
 
-All connections — REPL, SDK clients, REST API — are now encrypted. The server refuses plain TCP connections.
-
-### Connect the REPL with TLS
-
 ```powershell
-# Self-signed cert (skips certificate verification — dev only)
+# Self-signed cert — dev / localhost only
 pulsedb-repl --tls --tls-no-verify
 
-# Production (verifies cert against system trust roots)
+# CA-signed cert — production
 pulsedb-repl --tls --addr myserver.example.com:7878
 ```
 
-| Flag | Description |
+| REPL Flag | Description |
 | --- | --- |
-| `--tls` | Enable TLS on the REPL connection |
-| `--tls-no-verify` | Skip certificate verification (self-signed certs, dev only) |
+| `--tls` | Enable TLS on the connection |
+| `--tls-no-verify` | Skip certificate verification (self-signed certs only) |
 
-### SDK clients with TLS
+> **SDK clients:** Native TLS support for Python/Go/JavaScript SDKs is on the roadmap. Until then, connect through a TLS-terminating reverse proxy (nginx, Caddy) for non-localhost connections.
 
-Until the SDKs add native TLS support, tunnel the connection through a local TLS proxy (e.g. `stunnel`) or connect only from localhost over a TLS-terminated reverse proxy (e.g. nginx, Caddy).
+---
 
-### WAL Encryption (at-rest)
+## WAL Encryption — Data at Rest
 
-Even with TLS, WAL data on disk is plaintext. Encrypt it with AES-256-GCM by setting `PULSEDB_WAL_KEY`:
+Encrypt WAL files with AES-256-GCM by setting `PULSEDB_WAL_KEY`:
 
 ```bash
-# Generate a 32-byte key (64 hex chars)
-export PULSEDB_WAL_KEY="$(openssl rand -hex 32)"
+export PULSEDB_WAL_KEY="$(openssl rand -hex 32)"   # Linux / macOS
+$env:PULSEDB_WAL_KEY = (openssl rand -hex 32)       # Windows PowerShell
 
-# Start the server — WAL records are now encrypted on disk
 pulsedb-server
 ```
 
-The key is **not** stored anywhere by PulseDB — you must supply it on every start. Store it in a secrets manager (AWS Secrets Manager, HashiCorp Vault, etc.) and inject it as an env var.
+**Important:**
 
-> If `PULSEDB_WAL_KEY` is unset at startup, WAL records are written as plain JSON (backward-compatible). Set it to enable encryption going forward. Existing unencrypted records are automatically detected and read without decryption; new records will be encrypted.
+- The key is never stored by PulseDB — supply it on every start
+- Store it in a secrets manager (AWS Secrets Manager, HashiCorp Vault, Azure Key Vault)
+- Existing unencrypted WAL lines are auto-detected and read without decryption
+- New records written after the key is set will be encrypted
+- Losing the key means losing access to all encrypted WAL data
 
 ---
 
 ## Connecting with the REPL
 
-`pulsedb-repl` is the interactive command-line client.
-
 ```powershell
-# Connect to the local server (default: 127.0.0.1:7878)
-pulsedb-repl
-
-# Connect to a remote server
-pulsedb-repl --addr 192.168.1.10:7878
+pulsedb-repl                              # local server
+pulsedb-repl --addr 192.168.1.10:7878    # remote
+pulsedb-repl --tls --addr server:7878    # remote with TLS
 ```
 
-At the `pulseql>` prompt, type any PulseQL statement and press Enter to execute it.
-
 | Input | Action |
-|-------|--------|
+| --- | --- |
 | Any PulseQL statement | Execute and print result |
-| `help` or `\help` | Show help |
-| `exit`, `quit`, or `\q` | Disconnect and exit |
-| `Ctrl+C` / `Ctrl+D` | Disconnect and exit |
+| `help` or `\help` | Show command reference |
+| `exit`, `quit`, or `\q` | Disconnect |
+| `Ctrl+C` / `Ctrl+D` | Disconnect |
 
 ---
 
 ## Client SDKs
 
-Official client libraries are in the `clients/` directory. Each wraps the TCP + JSON protocol and exposes a native API for its language.
+Official clients live in `clients/`. Each wraps the TCP + JSON protocol.
+
+> **Security:** SDK connections are plain TCP. Only connect over localhost or a trusted private network, or route through a TLS-terminating proxy. Native TLS support is on the roadmap.
 
 ---
 
 ### Python
 
-**Requirements:** Python 3.8+, no extra dependencies.
-
 ```bash
-# From the cloned repo
 git clone https://github.com/Ajaikumar0712/PulseDB
 pip install ./PulseDB/clients/python
-
-# Once published to PyPI (coming soon)
-# pip install pulsedb
+# pip install pulsedb  ← once published on PyPI
 ```
-
-> **Security note:** PulseDB connections are not yet encrypted. Only connect over localhost or a trusted private network. TLS support is on the roadmap.
 
 ```python
 import os
-from pulsedb import PulseDB, PulseDBError
+from pulsedb import PulseDB
 
 with PulseDB.connect("127.0.0.1", 7878) as db:
-    db.auth(os.environ["PULSEDB_USER"], os.environ["PULSEDB_PASSWORD"])  # never hardcode
-
+    db.auth(os.environ["PULSEDB_USER"], os.environ["PULSEDB_PASSWORD"])
     db.query("MAKE TABLE users (id int PRIMARY KEY, name text, age int)")
     db.query('PUT users { id: 1, name: "Alice", age: 30 }')
-    db.query('PUT users { id: 2, name: "Bob",   age: 25 }')
-
     result = db.query("GET users WHERE age >= 28")
     for row in result:
         print(row.id, row.name, row.age)
-        # or: print(row.as_dict())
-
-    # Single row
-    first = db.query("GET users LIMIT 1").rows[0]
-    print(first["name"])
 ```
-
-**API:**
 
 | Method | Description |
 | --- | --- |
-| `PulseDB.connect(host, port)` | Open a connection (class method) |
-| `db.auth(username, password)` | Authenticate the session |
-| `db.query(q)` | Execute any PulseQL string; returns `Result` |
+| `PulseDB.connect(host, port)` | Open a connection |
+| `db.auth(user, password)` | Authenticate the session |
+| `db.query(q)` | Run any PulseQL string; returns `Result` |
 | `db.close()` | Close the connection |
 | `result.rows` | List of `Row` objects |
-| `result.columns` | List of column names |
-| `row["col"]` / `row.col` | Access a column value by name |
-| `row.as_dict()` | Row as a plain dict |
+| `row["col"]` / `row.col` | Column value by name |
+| `row.as_dict()` | Row as a plain `dict` |
 
 ---
 
 ### Go
 
-**Requirements:** Go 1.18+.
-
 ```bash
 go get github.com/Ajaikumar0712/PulseDB/clients/go
 ```
 
-> **Security note:** PulseDB connections are not yet encrypted. Only connect over localhost or a trusted private network. TLS support is on the roadmap.
-
 ```go
-package main
-
 import (
     "fmt"
     "os"
     pulsedb "github.com/Ajaikumar0712/PulseDB/clients/go"
 )
 
-func main() {
-    c, err := pulsedb.Connect("127.0.0.1:7878")
-    if err != nil {
-        panic(err)
-    }
-    defer c.Close()
-
-    c.Auth(os.Getenv("PULSEDB_USER"), os.Getenv("PULSEDB_PASSWORD"))  // never hardcode
-
-    c.Query(`MAKE TABLE users (id int PRIMARY KEY, name text, age int)`)
-    c.Query(`PUT users { id: 1, name: "Alice", age: 30 }`)
-
-    result, err := c.Query("GET users WHERE age >= 28")
-    if err != nil {
-        panic(err)
-    }
-    for _, row := range result.Rows {
-        fmt.Println(row.Get("id"), row.Get("name"))
-        // or: row.Fields() → map[string]interface{}
-    }
+c, _ := pulsedb.Connect("127.0.0.1:7878")
+defer c.Close()
+c.Auth(os.Getenv("PULSEDB_USER"), os.Getenv("PULSEDB_PASSWORD"))
+c.Query(`MAKE TABLE users (id int PRIMARY KEY, name text)`)
+c.Query(`PUT users { id: 1, name: "Alice" }`)
+result, _ := c.Query("GET users")
+for _, row := range result.Rows {
+    fmt.Println(row.Get("id"), row.Get("name"))
 }
 ```
 
-**API:**
-
-| Function / Method | Description |
-| --- | --- |
-| `pulsedb.Connect(addr)` | Dial TCP; returns `*Client` |
-| `c.Auth(username, password)` | Authenticate the session |
-| `c.Query(q)` | Execute any PulseQL string; returns `*Result` |
-| `c.Close()` | Close the connection |
-| `result.Rows` | `[]*Row` |
-| `row.Get("col")` | Column value by name |
-| `row.Fields()` | Row as `map[string]interface{}` |
-
-The `Client` is thread-safe — a single connection can be shared across goroutines.
+`Client` is thread-safe — share a single connection across goroutines.
 
 ---
 
 ### JavaScript
 
-**Requirements:** Node.js 14+, no npm dependencies.
-
 ```bash
-# Copy or symlink clients/javascript/index.js into your project
+# Copy clients/javascript/index.js into your project
 ```
-
-> **Security note:** PulseDB connections are not yet encrypted. Only connect over localhost or a trusted private network. TLS support is on the roadmap.
 
 ```js
 const { PulseDB } = require('./clients/javascript');
 
-async function main() {
-    const db = await PulseDB.connect({ host: '127.0.0.1', port: 7878 });
-
-    await db.auth(process.env.PULSEDB_USER, process.env.PULSEDB_PASSWORD);  // never hardcode
-
-    await db.query(`MAKE TABLE users (id int PRIMARY KEY, name text, age int)`);
-    await db.query(`PUT users { id: 1, name: "Alice", age: 30 }`);
-
-    const result = await db.query('GET users WHERE age >= 28');
-    for (const row of result) {
-        console.log(row.id, row.name);   // direct property access
-        console.log(row.toObject());     // plain object
-    }
-
-    db.close();
-}
-
-main();
+const db = await PulseDB.connect({ host: '127.0.0.1', port: 7878 });
+await db.auth(process.env.PULSEDB_USER, process.env.PULSEDB_PASSWORD);
+await db.query(`MAKE TABLE users (id int PRIMARY KEY, name text)`);
+await db.query(`PUT users { id: 1, name: "Alice" }`);
+const result = await db.query('GET users');
+for (const row of result) { console.log(row.id, row.name); }
+db.close();
 ```
 
-**One-shot helper:**
+---
+
+## ORM
+
+Declarative model layers on top of the raw TCP clients — no raw PulseQL strings required. Full examples in `clients/*/example_orm.*`.
+
+---
+
+### Python ORM
+
+```python
+from pulsedb.orm import connect, Model, IntField, TextField, FloatField, BoolField, VectorField
+
+db = connect("127.0.0.1", 7878)
+
+class User(Model):
+    class Meta:
+        db    = db
+        table = "users"
+
+    id     = IntField(primary_key=True)
+    name   = TextField()
+    age    = IntField()
+    active = BoolField(default=True)
+    score  = FloatField(default=0.0)
+
+# Schema
+User.create_table()
+User.create_index("age")
+
+# Write
+alice = User.create(id=1, name="Alice", age=30)
+alice.update(score=0.95)
+
+with db.transaction():
+    User.create(id=2, name="Bob",   age=25)
+    User.create(id=3, name="Carol", age=35)
+
+# Read — full QuerySet API
+adults = User.filter(age__gte=18, active=True).order_by("-score").limit(10).all()
+user   = User.get(id=1)
+first  = User.filter(active=True).order_by("age").first()
+ids    = User.filter(id__in=[1, 2, 3]).all()
+
+# Update / delete
+User.filter(id=2).update(active=False)
+User.filter(active=False).delete()
+
+# Vector + fuzzy search
+User.similar("embedding", [0.9, 0.1, 0.2], k=10)
+User.fuzzy("name", "alic", limit=5)
+```
+
+**QuerySet lookup suffixes:**
+
+| Suffix | SQL equivalent |
+| --- | --- |
+| `field=value` | `field = value` |
+| `field__gt=v` | `field > v` |
+| `field__gte=v` | `field >= v` |
+| `field__lt=v` | `field < v` |
+| `field__lte=v` | `field <= v` |
+| `field__ne=v` | `field != v` |
+| `field__in=[a,b]` | `(field=a OR field=b)` |
+
+**Field types:** `IntField` · `FloatField` · `TextField` · `BoolField` · `VectorField` · `JsonField`
+
+---
+
+### JavaScript ORM
+
+Full TypeScript definitions included (`clients/javascript/orm.d.ts`).
 
 ```js
-const result = await PulseDB.withConnection(
-    async (db) => db.query('GET users LIMIT 10'),
-    { host: '127.0.0.1', port: 7878 }
-);
+const { defineModel, DataTypes, withTransaction } = require('./clients/javascript/orm');
+
+const User = defineModel('users', {
+  id:     { type: DataTypes.INT,   primaryKey: true },
+  name:   { type: DataTypes.TEXT },
+  age:    { type: DataTypes.INT },
+  active: { type: DataTypes.BOOL,  defaultValue: true },
+  score:  { type: DataTypes.FLOAT, defaultValue: 0.0 },
+}, { db });
+
+await User.createTable();
+await User.create({ id: 1, name: 'Alice', age: 30 });
+
+// Query
+const adults = await User.findAll({ where: { age: { gte: 18 } }, orderBy: '-score', limit: 10 });
+const alice  = await User.findByPk(1);
+const first  = await User.findOne({ where: { active: true }, orderBy: 'age' });
+
+// Update / delete
+await User.update({ active: false }, { where: { age: { lt: 18 } } });
+await User.destroy({ where: { id: 99 } });
+
+// Vector + fuzzy
+await User.similar('embedding', [0.9, 0.1, 0.2], { limit: 10 });
+await User.fuzzy('name', 'alic', { limit: 5 });
+
+// QuerySet chaining
+await User.where({ active: true }).orderBy('-score').limit(5).all();
+
+// Transaction
+await withTransaction(db, async () => {
+  await User.bulkCreate([{ id: 2, name: 'Bob' }, { id: 3, name: 'Carol' }]);
+});
 ```
 
-**API:**
+---
 
-| Method | Description |
+### Go ORM
+
+Struct tags — no code generation required.
+
+```go
+type User struct {
+    ID     int     `pulsedb:"id,primary_key"`
+    Name   string  `pulsedb:"name"`
+    Age    int     `pulsedb:"age"`
+    Active bool    `pulsedb:"active"`
+    Score  float64 `pulsedb:"score"`
+}
+
+client, _ := pulsedb.Connect("127.0.0.1:7878")
+orm := pulsedb.NewORM(client)
+
+orm.CreateTable(&User{})
+orm.Create(&User{ID: 1, Name: "Alice", Age: 30, Active: true})
+
+var users []User
+orm.Q(&User{}).Where("age >= 18").Where("active = true").OrderBy("score", true).Limit(10).Find(&users)
+
+var alice User
+orm.FindByPK(&alice, 1)
+
+orm.Q(&User{}).Where("id = 1").Update(map[string]interface{}{"score": 0.95})
+orm.Q(&User{}).Where("active = false").Delete()
+
+orm.Transaction(func(o *pulsedb.ORM) error {
+    return o.Create(&User{ID: 2, Name: "Bob", Age: 25})
+})
+
+// Vector + fuzzy
+orm.Q(&User{}).Similar("embedding", []float64{0.9, 0.1, 0.2}, 10)
+orm.Q(&User{}).Fuzzy("name", "alic", 20)
+```
+
+---
+
+## Migration Tool
+
+Import tables, rows, and indexes from an existing database into PulseDB with one command.
+
+**Supported sources:** PostgreSQL · MySQL · SQLite (no extra install) · MongoDB
+
+```bash
+# Install only the driver you need
+pip install psycopg2-binary   # PostgreSQL
+pip install pymysql           # MySQL
+pip install pymongo           # MongoDB
+# SQLite uses stdlib — nothing to install
+```
+
+```bash
+# Preview — no data written
+python tools/migrate.py postgres://postgres:pass@localhost/mydb --dry-run
+
+# Real migration
+python tools/migrate.py postgres://postgres:pass@localhost/mydb --no-auth
+
+# Migrate specific tables
+python tools/migrate.py sqlite:///myapp.db --tables users orders products
+
+# MySQL / MongoDB
+python tools/migrate.py mysql://root:pass@localhost/shop --batch 5000
+python tools/migrate.py mongodb://localhost/analytics
+
+# Remote PulseDB target
+python tools/migrate.py postgres://... --target 192.168.1.10:7878
+```
+
+**What happens:**
+
+1. Connects to the source database
+2. Discovers all tables (or only the ones in `--tables`)
+3. Maps SQL types → PulseQL types automatically:
+
+   | SQL | PulseQL |
+   | --- | --- |
+   | `int`, `bigint`, `serial` | `int` |
+   | `float`, `double`, `decimal` | `float` |
+   | `varchar`, `text`, `uuid` | `text` |
+   | `boolean` | `bool` |
+   | `json`, `jsonb` | `json` |
+   | `bytea`, `blob` | `blob` |
+   | `timestamp`, `date` | `text` |
+
+4. Creates tables in PulseDB (`MAKE TABLE`)
+5. Copies rows in batches using transactions (default 1000 rows/batch, set with `--batch`)
+6. Creates indexes (`MAKE INDEX`)
+7. Shows a live progress bar and final summary
+
+```text
+  users  (100,000 rows)
+  [████████████████████████████████████████] 100,000/100,000 100.0%
+  ✓ 100,000 rows  4.2s  23,809 rows/s
+
+═══════════════════════════════════════════════
+  Migration complete
+  Tables : 3      Rows : 542,000
+  Time   : 18.4s  Rate : 29,456 rows/s
+═══════════════════════════════════════════════
+```
+
+**Flags:**
+
+| Flag | Description |
 | --- | --- |
-| `PulseDB.connect(opts)` | Open connection; returns `Promise<PulseDB>` |
-| `PulseDB.withConnection(fn, opts)` | Auto-closing one-shot helper |
-| `db.auth(username, password)` | Authenticate the session |
-| `db.query(q)` | Execute PulseQL; returns `Promise<Result>` |
-| `db.close()` | Destroy the socket |
-| `result.rows` | Array of `Row` objects |
-| `row.<colName>` | Direct property access |
-| `row.toObject()` | Row as a plain object |
+| `--target HOST:PORT` | PulseDB address (default: `127.0.0.1:7878`) |
+| `--tables T1 T2` | Migrate only specific tables |
+| `--batch N` | Rows per transaction batch (default: 1000) |
+| `--dry-run` | Preview schema + first row, no writes |
+| `--skip-existing` | Skip tables that already exist in PulseDB |
+| `--no-auth` | Connect to PulseDB without authenticating |
+| `--pulsedb-user` | PulseDB admin username |
+| `--pulsedb-password` | PulseDB admin password |
+
+---
+
+## Admin Dashboard
+
+A real-time web UI — no npm, no extra pip installs, pure Python stdlib.
+
+```bash
+python tools/admin/server.py --no-auth
+# Open http://127.0.0.1:8080
+```
+
+```bash
+python tools/admin/server.py --port 9090
+python tools/admin/server.py --pulsedb 192.168.1.10:7878
+python tools/admin/server.py --user admin --password secret
+python tools/admin/server.py --interval 1    # poll every 1 second
+```
+
+**Dashboard pages:**
+
+| Page | What you see |
+| --- | --- |
+| **Overview** | Uptime, TPS (live), total queries, WAL records, rows inserted/updated/deleted, transaction counts, latency p50/p95/p99/max bars, 60-second rolling TPS chart |
+| **Tables** | All tables in the database |
+| **Queries** | Currently executing queries with elapsed time and **Kill** button |
+| **Cluster** | Peer nodes, reachability, round-trip latency |
+| **Users** | All user accounts and roles |
+| **Console** | Run any PulseQL query — `Ctrl+Enter` to execute, raw JSON response shown |
+| **Config** | Runtime limits (max connections, timeouts, memory caps) |
+
+**Features:** auto-refresh every 2 seconds · live Canvas TPS chart · Kill query button · Checkpoint button · dark theme (GitHub/Vercel style) · no build step
 
 ---
 
 ## PulseQL Language Reference
 
-PulseQL is PulseDB's custom query language. It is **not SQL** — it uses different keywords designed to be readable and unambiguous.
+PulseQL is **not SQL** — different keywords, designed to be readable and unambiguous.
 
-- Statements can be separated by semicolons (`;`)
+- Statements can be separated by `;`
 - Identifiers are case-insensitive
 - String values use double quotes: `"hello"`
 - Passwords use single quotes: `'secret'`
@@ -611,7 +716,7 @@ PulseQL is PulseDB's custom query language. It is **not SQL** — it uses differ
 ### Data Types
 
 | Type | Description | Example |
-|------|-------------|---------|
+| --- | --- | --- |
 | `int` | 64-bit signed integer | `42`, `-10` |
 | `float` | 64-bit floating point | `3.14`, `-0.5` |
 | `text` | UTF-8 string | `"hello world"` |
@@ -619,55 +724,16 @@ PulseQL is PulseDB's custom query language. It is **not SQL** — it uses differ
 | `json` | Any JSON value | `{"key": "val"}` |
 | `blob` | Raw binary data | — |
 | `vector` | Dense f32 vector for similarity search | `[0.1, 0.9, 0.3]` |
-| `null` | Absent / null value | `null` |
+| `null` | Absent value | `null` |
 
 ---
 
 ### Table Management
 
-#### MAKE TABLE — Create a table
-
-```
-MAKE TABLE <table> (
-    <column> <type> [PRIMARY KEY],
-    ...
-)
-```
-
 ```sql
-MAKE TABLE users (
-    id     int  PRIMARY KEY,
-    name   text,
-    age    int,
-    active bool
-)
-
-MAKE TABLE products (
-    id    int   PRIMARY KEY,
-    name  text,
-    price float,
-    tags  json
-)
-```
-
-#### MAKE INDEX — Create an index
-
-Indexes speed up `WHERE` and `ORDER BY` on frequently-queried columns.
-
-```sql
-MAKE INDEX ON users (name)
-MAKE INDEX ON products (price)
-```
-
-#### DROP TABLE — Delete a table and all its data
-
-```sql
+MAKE TABLE users (id int PRIMARY KEY, name text, age int, active bool)
+MAKE INDEX ON users (age)
 DROP TABLE users
-```
-
-#### SHOW TABLES — List all tables
-
-```sql
 SHOW TABLES
 ```
 
@@ -675,536 +741,196 @@ SHOW TABLES
 
 ### Writing Data
 
-#### PUT — Insert or replace a row
-
-```
-PUT <table> { <field>: <value>, ... }
-```
-
-If a row with the same primary key already exists, `PUT` replaces it (upsert).
-
 ```sql
+-- PUT — insert or replace a row (upsert)
 PUT users { id: 1, name: "Alice", age: 30, active: true }
 PUT users { id: 2, name: "Bob",   age: 25, active: false }
-PUT users { id: 3, name: "Carol", age: 35, active: true }
-```
 
-#### SET — Update existing rows
-
-```
-SET <table> { <field>: <value>, ... } [WHERE <condition>]
-```
-
-```sql
--- Update one row
+-- SET — update specific fields on matching rows
 SET users { age: 31 } WHERE id = 1
+SET users { active: false } WHERE age < 18
+SET products { price: 0.0 }          -- no WHERE = update all rows
 
--- Update all matching rows
-SET users { active: false } WHERE age < 25
-
--- Update every row (no WHERE clause)
-SET products { price: 0.0 }
-```
-
-#### DEL — Delete rows
-
-```
-DEL <table> [WHERE <condition>]
-```
-
-```sql
--- Delete one row
+-- DEL — delete rows
 DEL users WHERE id = 2
-
--- Delete matching rows
 DEL users WHERE active = false
-
--- Clear the entire table
-DEL users
+DEL users                             -- no WHERE = clear the table
 ```
 
 ---
 
 ### Reading Data
 
-#### GET — Retrieve rows
-
-```
-GET <table>
-    [JOIN ...]
-    [WHERE <condition>]
-    [GROUP BY ...]
-    [ORDER BY <column> [ASC | DESC]]
-    [LIMIT <n>]
-    [TIMEOUT "<duration>"]
-```
-
 ```sql
--- All rows
 GET users
-
--- Filtered
 GET users WHERE active = true
-GET users WHERE age >= 25
-
--- Compound condition
 GET users WHERE age >= 25 AND active = true
-
--- Ordered and limited
 GET users ORDER BY age DESC LIMIT 10
-
--- With query timeout
 GET users WHERE active = true TIMEOUT "5s"
 ```
 
-**TIMEOUT duration formats:**
-
-| Format | Meaning |
-|--------|---------|
-| `"500ms"` | 500 milliseconds |
-| `"5s"` | 5 seconds |
-| `"2m"` | 2 minutes |
-
-> The duration must be a **quoted string**: `TIMEOUT "5s"` ✅ — not `TIMEOUT 5s` ❌
+**TIMEOUT formats:** `"500ms"` · `"5s"` · `"2m"` — must be a quoted string.
 
 ---
 
 ### Joins
 
-Combine rows from two tables in a single query.
-
-```
-GET <left_table>
-    [INNER | LEFT | RIGHT] JOIN <right_table> ON <condition>
-    [WHERE <condition>]
-    [ORDER BY <col>]
-    [LIMIT <n>]
-```
-
-| Join Type | Returns |
-|-----------|---------|
-| `INNER JOIN` | Only rows that match in **both** tables |
-| `LEFT JOIN` | **All** left rows; `null` for unmatched right columns |
-| `RIGHT JOIN` | **All** right rows; `null` for unmatched left columns |
-
-**Setup:**
-
 ```sql
-MAKE TABLE users  (id int PRIMARY KEY, name text)
-MAKE TABLE orders (id int PRIMARY KEY, user_id int, total float)
-
-PUT users  { id: 1, name: "Alice" }
-PUT users  { id: 2, name: "Bob" }
-PUT orders { id: 10, user_id: 1, total: 49.99 }
-PUT orders { id: 11, user_id: 1, total: 12.50 }
-```
-
-**Queries:**
-
-```sql
--- Only users who have placed orders
 GET users INNER JOIN orders ON users.id = orders.user_id
-
--- All users, including those with no orders
-GET users LEFT JOIN orders ON users.id = orders.user_id
-
--- Filtered + sorted join
+GET users LEFT  JOIN orders ON users.id = orders.user_id
 GET users INNER JOIN orders ON users.id = orders.user_id
     WHERE orders.total > 20.0
     ORDER BY orders.total DESC
     LIMIT 5
 ```
 
-> When both tables share a column name, the right-table column is prefixed with the table name (e.g. `orders.id`).
+| Join Type | Returns |
+| --- | --- |
+| `INNER JOIN` | Rows matching in **both** tables |
+| `LEFT JOIN` | All left rows; `null` for unmatched right |
+| `RIGHT JOIN` | All right rows; `null` for unmatched left |
 
 ---
 
 ### Aggregation & GROUP BY
 
-Group rows and calculate aggregate values. Use `HAVING` to filter grouped results.
-
-```
-GET <table>
-    [WHERE <condition>]
-    GROUP BY <col> [, <col>]
-        [COUNT(*) | SUM(<col>) | AVG(<col>) | MIN(<col>) | MAX(<col>)] [AS <alias>]
-    [HAVING <condition>]
-    [ORDER BY <col>]
-    [LIMIT <n>]
-```
-
-**Aggregate functions:**
-
-| Function | Description |
-|----------|-------------|
-| `COUNT(*)` | Count all rows in the group |
-| `COUNT(<col>)` | Count non-null values in a column |
-| `SUM(<col>)` | Sum of all values |
-| `AVG(<col>)` | Arithmetic mean |
-| `MIN(<col>)` | Minimum value |
-| `MAX(<col>)` | Maximum value |
-
-**Examples:**
-
 ```sql
-MAKE TABLE orders (id int PRIMARY KEY, user_id int, country text, total float)
-
-PUT orders { id: 1, user_id: 1, country: "US", total: 49.99 }
-PUT orders { id: 2, user_id: 2, country: "US", total: 12.50 }
-PUT orders { id: 3, user_id: 3, country: "UK", total: 30.00 }
-
--- Count orders per country
-GET orders GROUP BY country COUNT(*) AS order_count
-
--- Total revenue per country, only where more than 1 order placed
-GET orders GROUP BY country SUM(total) AS revenue HAVING order_count > 1
-
--- Average order value per user, best first
-GET orders GROUP BY user_id AVG(total) AS avg_total ORDER BY avg_total DESC
+GET orders GROUP BY country COUNT(*) AS cnt SUM(total) AS revenue
+GET orders GROUP BY country SUM(total) AS revenue HAVING cnt > 1
+GET orders GROUP BY user_id AVG(total) AS avg ORDER BY avg DESC
 ```
+
+**Functions:** `COUNT(*)` · `COUNT(col)` · `SUM(col)` · `AVG(col)` · `MIN(col)` · `MAX(col)`
 
 ---
 
 ### Fuzzy Search
 
-#### FIND — Trigram-based similarity search
-
-Find rows where a text column closely resembles a search pattern. Handles typos and partial matches.
-
-```
-FIND <table> WHERE <column> ~ "<pattern>" [LIMIT <n>]
-```
-
-Results are ranked by similarity score (best match first).
-
 ```sql
--- Finds "Alice" even with typo "alic"
-FIND users WHERE name ~ "alic"
-
--- Partial match — "widge" finds "Widget"
+FIND users WHERE name ~ "alic"           -- finds "Alice" even with typo
 FIND products WHERE name ~ "widge" LIMIT 5
-```
-
-The `~` operator can also be used inside a regular `GET`:
-
-```sql
-GET users WHERE name ~ "alice"
+GET users WHERE name ~ "alice"           -- ~ also works inside GET
 ```
 
 ---
 
 ### Vector Similarity Search
 
-Store dense float vectors in a `vector` column and search for the closest rows by cosine similarity. Results are ranked by an `_score` column (0.0–1.0). Backed by an **HNSW** index for fast approximate nearest-neighbour lookup.
-
-```
-SIMILAR <table> [ON <column>] TO [<f>, <f>, ...] [LIMIT <n>]
-```
-
-**Setup:**
-
 ```sql
-MAKE TABLE items (
-    id        int    PRIMARY KEY,
-    label     text,
-    embedding vector
-)
+MAKE TABLE items (id int PRIMARY KEY, label text, embedding vector)
 
-PUT items { id: 1, label: "cat",  embedding: [0.9, 0.1, 0.0] }
-PUT items { id: 2, label: "dog",  embedding: [0.8, 0.2, 0.1] }
-PUT items { id: 3, label: "fish", embedding: [0.1, 0.1, 0.9] }
+PUT items { id: 1, label: "cat", embedding: [0.9, 0.1, 0.0] }
+PUT items { id: 2, label: "dog", embedding: [0.8, 0.2, 0.1] }
+
+SIMILAR items ON embedding TO [0.85, 0.15, 0.05] LIMIT 10
 ```
 
-**Query:**
-
-```sql
-SIMILAR items ON embedding TO [0.85, 0.15, 0.05] LIMIT 2
-```
-
-**Response:**
-
-```json
-{
-  "status": "ok",
-  "result": {
-    "Rows": {
-      "columns": ["id", "label", "embedding", "_score"],
-      "rows": [
-        [1, "cat", "vec[3 dims]", 0.9998],
-        [2, "dog", "vec[3 dims]", 0.9965]
-      ]
-    }
-  }
-}
-```
-
-> If the table has only one `vector` column, `ON <column>` can be omitted.
+Results include an `_score` column (0.0–1.0). Backed by an **HNSW** index. `ON <column>` can be omitted when the table has exactly one `vector` column.
 
 ---
 
 ### Streaming Watch Queries
 
-`WATCH` opens a **server-push subscription**. The server streams a JSON event to your connection every time a matching row is inserted, updated, or deleted — no polling required.
-
-#### WATCH — Subscribe to changes
-
-```
-WATCH <table> [WHERE <condition>]
-```
-
 ```sql
-WATCH users WHERE active = true
+WATCH users WHERE active = true     -- opens push subscription
+UNWATCH 1                           -- cancel subscription
 ```
 
-**Acknowledgement (sent once immediately):**
+Push events (one JSON line per change):
 
 ```json
-{"status":"ok","watch_id":1,"message":"watching, subscription id=1"}
-```
-
-**Push events** (one JSON line per change, streamed in real time):
-
-```json
-{"status":"watch","id":1,"op":"insert","row":{"id":4,"name":"Dave","age":22,"active":true}}
-{"status":"watch","id":1,"op":"update","row":{"id":2,"name":"Bob","age":26,"active":true}}
-{"status":"watch","id":1,"op":"delete","row":{"id":3,"name":"Carol","age":35,"active":true}}
-```
-
-| `op` | Triggered by |
-|------|-------------|
-| `insert` | `PUT` added a row matching the filter |
-| `update` | `SET` changed a row matching the filter |
-| `delete` | `DEL` removed a row that matched the filter |
-
-You can have multiple active subscriptions per connection — each gets a unique `watch_id`. Other queries can still run on the same connection while watching.
-
-#### UNWATCH — Cancel a subscription
-
-```sql
-UNWATCH 1
+{"status":"watch","id":1,"op":"insert","row":{"id":4,"name":"Dave","active":true}}
+{"status":"watch","id":1,"op":"update","row":{"id":2,"name":"Bob","active":true}}
+{"status":"watch","id":1,"op":"delete","row":{"id":3,"name":"Carol","active":false}}
 ```
 
 ---
 
 ### Transactions
 
-Operations inside a transaction are applied atomically — either **all succeed** or **all are rolled back**.
-
 ```sql
 BEGIN
 
-PUT users { id: 10, name: "Dave", age: 28, active: true }
+PUT users { id: 10, name: "Dave", age: 28 }
 SET users { age: 29 } WHERE id = 10
 DEL users WHERE id = 5
 
-COMMIT
+COMMIT     -- apply all changes atomically
+ROLLBACK   -- discard everything since BEGIN
 ```
 
-**Rollback:**
-
-```sql
-BEGIN
-PUT users { id: 99, name: "Test", age: 0 }
-ROLLBACK
-```
-
-| Statement | Description |
-|-----------|-------------|
-| `BEGIN` | Start a transaction |
-| `COMMIT` | Apply all changes permanently |
-| `ROLLBACK` | Discard all changes since `BEGIN` |
-
-PulseDB uses **MVCC (Multi-Version Concurrency Control)** — readers never block writers and writers never block readers.
+PulseDB uses **MVCC** — readers never block writers and writers never block readers.
 
 ---
 
 ### REST API
 
-PulseDB can expose any table as an HTTP REST endpoint — useful for integrating with tools or services that speak HTTP instead of PulseQL.
-
-#### API GENERATE — Create HTTP endpoints for a table
-
-```
-API GENERATE FOR <table>
-```
-
 ```sql
-API GENERATE FOR users
+API GENERATE FOR users     -- starts HTTP server, returns port + API key
+API STOP FOR users
+SHOW APIS
 ```
 
-This starts an HTTP server on an auto-assigned port (starting at 7879), bound to `127.0.0.1`. The response includes a **per-table API key** — include it on every request:
+Response from `API GENERATE FOR`:
 
-```
+```text
 REST API for `users` running at http://127.0.0.1:7879/api/users
-API key: a3f9c2b1d4e8f07a6b5c4d3e2f1a0b9c (include as: Authorization: Bearer a3f9c2b1d4e8f07a6b5c4d3e2f1a0b9c)
+API key: a3f9c2b1d4e8... (include as: Authorization: Bearer a3f9c2b1d4e8...)
 ```
 
-Five endpoints are created per table:
+**Endpoints:**
 
 | Method | Path | Action |
 | --- | --- | --- |
 | `GET` | `/api/<table>` | Fetch all rows |
-| `POST` | `/api/<table>` | Insert a row (body: JSON object) |
-| `GET` | `/api/<table>/<id>` | Fetch a single row by UUID |
-| `PUT` | `/api/<table>/<id>` | Update row fields (body: partial JSON) |
+| `POST` | `/api/<table>` | Insert a row |
+| `GET` | `/api/<table>/<id>` | Fetch a single row |
+| `PUT` | `/api/<table>/<id>` | Update row fields |
 | `DELETE` | `/api/<table>/<id>` | Delete a row |
 
-All requests must include `Authorization: Bearer <api_key>`. Missing or wrong keys return HTTP 401.
-
-> Nested objects are not supported in POST/PUT request bodies.
-
-**Example (PowerShell):**
+All requests require `Authorization: Bearer <api_key>`. Wrong or missing key → **401**. Exceeding 100 req/s per IP → **429**.
 
 ```powershell
-$key = "a3f9c2b1d4e8f07a6b5c4d3e2f1a0b9c"  # from API GENERATE FOR output
+$key = "a3f9c2b1d4e8..."
 $h   = @{ Authorization = "Bearer $key" }
-
-# Read all rows
-Invoke-RestMethod -Uri "http://127.0.0.1:7879/api/users" -Method GET -Headers $h
-
-# Insert a row
-Invoke-RestMethod -Uri "http://127.0.0.1:7879/api/users" -Method POST -Headers $h `
-    -ContentType "application/json" `
-    -Body '{"id":99,"name":"REST User","age":22}'
-
-# Fetch by ID
-Invoke-RestMethod -Uri "http://127.0.0.1:7879/api/users/<uuid>" -Method GET -Headers $h
-
-# Update fields
-Invoke-RestMethod -Uri "http://127.0.0.1:7879/api/users/<uuid>" -Method PUT -Headers $h `
-    -ContentType "application/json" `
-    -Body '{"age":23}'
-
-# Delete
-Invoke-RestMethod -Uri "http://127.0.0.1:7879/api/users/<uuid>" -Method DELETE -Headers $h
+Invoke-RestMethod -Uri "http://127.0.0.1:7879/api/users" -Headers $h
 ```
-
-#### API STOP — Shut down an endpoint
-
-```sql
-API STOP FOR users
-```
-
-#### SHOW APIS — List active endpoints
-
-```sql
-SHOW APIS
-```
-
-Returns each active table alongside its port number.
 
 ---
 
 ### Security & User Management
 
-PulseDB supports user accounts with **Argon2id** hashed passwords (memory-hard, GPU-resistant), admin roles, and per-table operation grants.
-
-**Authentication is required by default.** Every connection must call `AUTH` before running queries. Pass `--no-auth` to disable authentication (localhost / development only).
-
-#### AUTH — Authenticate a session
+Authentication is **required by default**. Passwords use **Argon2id** (memory-hard, GPU-resistant).
 
 ```sql
 AUTH alice 'secret123'
-```
 
-#### CREATE USER — Add a user account
-
-```sql
--- Regular user
 CREATE USER bob PASSWORD 'hunter2'
-
--- Admin user (can manage users and grants)
 CREATE ADMIN USER carol PASSWORD 'admin-pass'
-```
-
-#### DROP USER — Remove a user
-
-```sql
 DROP USER bob
-```
 
-#### GRANT — Give a user permission on a table
-
-```
-GRANT <op> ON <table | *> TO <username>
-```
-
-Operations: `select`, `insert`, `update`, `delete`, `all`
-
-```sql
--- Allow bob to read from users
 GRANT select ON users TO bob
-
--- Give carol full access to all tables
 GRANT all ON * TO carol
-```
-
-#### REVOKE — Remove a permission
-
-```sql
 REVOKE insert ON orders FROM bob
-```
 
-#### SHOW USERS — List all accounts
-
-```sql
 SHOW USERS
 ```
 
-| Column | Description |
-|--------|-------------|
-| `username` | Account name |
-| `is_admin` | `true` if the account has admin privileges |
+**GRANT operations:** `select` · `insert` · `update` · `delete` · `all`
+
+> Pass `--no-auth` to start the server in open mode (dev / localhost only).
 
 ---
 
 ### Cluster Commands
 
-PulseDB supports a lightweight cluster layer with TCP heartbeat monitoring, Raft-based leader election, and hash-based shard routing.
-
-> **Note:** Data replication between nodes is not yet implemented. The cluster layer currently handles membership tracking and health monitoring only.
-
-#### CLUSTER JOIN — Add a peer node
-
 ```sql
 CLUSTER JOIN "192.168.1.20:7878"
-```
-
-#### CLUSTER PART — Remove a peer node
-
-```sql
 CLUSTER PART "192.168.1.20:7878"
-```
-
-#### CLUSTER STATUS — List all peers and their health
-
-```sql
 CLUSTER STATUS
-```
 
-| Column | Description |
-|--------|-------------|
-| `addr` | Peer address (`host:port`) |
-| `reachable` | `true` if the last heartbeat succeeded |
-| `latency_ms` | Round-trip time in ms, or `null` if never probed |
-
-#### CLUSTER SHARD ASSIGN — Configure hash sharding for a table
-
-Distributes a table across N shards using FNV-1a hash routing, assigned round-robin to the listed nodes.
-
-```sql
-CLUSTER SHARD ASSIGN orders SHARDS 4 NODES "node1:7878", "node2:7878", "node3:7878"
-```
-
-#### CLUSTER SHARD STATUS — Show all shard assignments
-
-```sql
+CLUSTER SHARD ASSIGN orders SHARDS 4 NODES "n1:7878", "n2:7878"
 CLUSTER SHARD STATUS
-```
-
-#### CLUSTER SHARD DROP — Remove shard assignment for a table
-
-```sql
 CLUSTER SHARD DROP orders
 ```
 
@@ -1212,33 +938,13 @@ CLUSTER SHARD DROP orders
 
 ### Triggers
 
-Triggers fire a PulseQL query automatically whenever a specific mutation event occurs on a table.
-
-> **Admin only.** `TRIGGER` and `DROP TRIGGER` require an admin session. Trigger recursion is capped at depth 5 to prevent infinite loops.
-
-#### TRIGGER — Create a trigger
-
-```
-TRIGGER <name> WHEN PUT|SET|DEL <table> DO <query>
-```
+> **Admin only.** Recursion capped at depth 5.
 
 ```sql
--- Log every new user insert into an audit table
-TRIGGER log_new_user WHEN PUT users DO PUT audit { action: "user_inserted" }
-
--- Clear a cache table whenever orders are updated
+TRIGGER log_insert WHEN PUT users  DO PUT audit { action: "user_added" }
 TRIGGER bust_cache WHEN SET orders DO DEL order_cache
-```
 
-#### DROP TRIGGER — Remove a trigger
-
-```sql
-DROP TRIGGER log_new_user
-```
-
-#### SHOW TRIGGERS — List all triggers
-
-```sql
+DROP TRIGGER log_insert
 SHOW TRIGGERS
 ```
 
@@ -1246,32 +952,18 @@ SHOW TRIGGERS
 
 ### Graph Queries
 
-`GRAPH MATCH` traverses a node–edge–node relationship across three tables in a single query.
-
-```
-GRAPH MATCH (src_alias:src_table) -[edge_alias:edge_table]-> (dst_alias:dst_table)
+```sql
+GRAPH MATCH (a:people) -[rel:follows]-> (b:people)
     [WHERE <condition>]
     [LIMIT <n>]
 ```
 
-The edge table must have `from_id` and `to_id` columns pointing to the primary keys of the source and destination tables. Result columns are prefixed with their alias (e.g. `a.name`, `rel.weight`, `b.id`).
-
-> **Limits:** Default LIMIT is 100. Maximum is 10,000 — queries above this return an error. The limit is mandatory to prevent unbounded traversal from exhausting memory. SELECT permission is checked on all three tables (src, edge, dst) before execution.
-
-**Setup:**
+The edge table must have `from_id` and `to_id` columns. Default LIMIT 100, maximum 10,000. SELECT permission is checked on all three tables.
 
 ```sql
-MAKE TABLE people   (id int PRIMARY KEY, name text)
-MAKE TABLE follows  (id int PRIMARY KEY, from_id int, to_id int, since text)
+MAKE TABLE people  (id int PRIMARY KEY, name text)
+MAKE TABLE follows (id int PRIMARY KEY, from_id int, to_id int)
 
-PUT people  { id: 1, name: "Alice" }
-PUT people  { id: 2, name: "Bob" }
-PUT follows { id: 10, from_id: 1, to_id: 2, since: "2024-01" }
-```
-
-**Query:**
-
-```sql
 GRAPH MATCH (a:people) -[rel:follows]-> (b:people)
     WHERE a.name = "Alice"
     LIMIT 10
@@ -1281,27 +973,10 @@ GRAPH MATCH (a:people) -[rel:follows]-> (b:people)
 
 ### Time Travel Queries
 
-Retrieve historical snapshots of data by timestamp or WAL version number.
-
-> **Permissions:** `AS OF` and `VERSION` queries apply the same SELECT permission check as a regular `GET`. A user without SELECT on a table cannot read its historical data.
-
-#### AS OF — Query data at a point in time
-
-```
-GET <table> AS OF "<timestamp>" [WHERE <condition>] [ORDER BY <col>] [LIMIT <n>]
-```
+Requires SELECT permission — same check as a regular GET.
 
 ```sql
 GET orders AS OF "2024-06-01T00:00:00Z" WHERE country = "US"
-```
-
-#### VERSION — Query data at a specific WAL version
-
-```
-GET <table> VERSION <n> [WHERE <condition>] [ORDER BY <col>] [LIMIT <n>]
-```
-
-```sql
 GET users VERSION 42
 ```
 
@@ -1309,101 +984,36 @@ GET users VERSION 42
 
 ### AI Search
 
-`AI SEARCH` performs hash-based text search over a table. Internally it projects text into a 128-dimensional space using FNV-1a hashing, then ranks rows by vector proximity to the query projection.
-
-> **Important:** FNV-1a is a hash function, not a language model. `AI SEARCH` matches on lexical overlap — it does **not** understand synonyms, intent, or meaning. "fast" and "quick" will not match each other. For genuine semantic search, store embeddings from a real model (OpenAI, HuggingFace, etc.) in a `vector` column and use `SIMILAR` instead.
-
-```
-AI SEARCH <table> "<query>" [LIMIT <n>]
-```
+Hash-based lexical search — **not** semantic / synonym-aware.
 
 ```sql
--- Works well for exact or near-exact keyword matches
 AI SEARCH products "noise cancelling headphones" LIMIT 5
 ```
 
-For true semantic similarity search, use `SIMILAR` with your own embeddings:
-
-```sql
--- Store a model-generated embedding and query by vector
-SIMILAR products ON embedding TO [0.12, 0.85, ...] LIMIT 5
-```
+> For semantic search, store model-generated embeddings in a `vector` column and use `SIMILAR`.
 
 ---
 
 ### Admin Commands
 
-#### EXPLAIN — Preview the execution plan
-
-Prefix any query with `EXPLAIN` to see how PulseDB will execute it, without running it. Useful for understanding index usage and optimiser decisions.
-
 ```sql
 EXPLAIN GET users WHERE age > 25 ORDER BY age DESC LIMIT 10
-EXPLAIN PUT users { id: 999, name: "Test" }
-EXPLAIN FIND products WHERE name ~ "widget"
-```
-
-#### CHECKPOINT — Flush all data to disk immediately
-
-```sql
-CHECKPOINT
-```
-
-#### SHOW RUNNING QUERIES — List active queries
-
-```sql
+CHECKPOINT                  -- flush all data to disk
 SHOW RUNNING QUERIES
-```
-
-Returns each executing query with its ID, text, start time, and elapsed time.
-
-#### KILL QUERY — Stop a running query
-
-```sql
--- Find the query ID first
-SHOW RUNNING QUERIES
-
--- Kill it by ID
 KILL QUERY 42
-```
-
-#### METRICS — Server statistics
-
-```sql
 METRICS
 ```
-
-See the [Metrics](#metrics) section for sample output.
 
 ---
 
 ### Resource Configuration
 
-Adjust runtime limits without restarting the server.
-
-#### CONFIG SET — Set a resource limit
-
-```
-CONFIG SET <key> <value>
-```
-
-| Key | Type | Description |
-|-----|------|-------------|
-| `max_connections` | int | Maximum concurrent client connections |
-| `max_rows_per_query` | int | Maximum rows a single query can return |
-| `default_timeout_ms` | int | Default query timeout in milliseconds |
-| `max_memory_mb` | int | Soft memory usage cap in MB |
-| `disk_quota_mb` | int | Disk usage cap in MB |
-
 ```sql
 CONFIG SET max_connections 200
 CONFIG SET max_rows_per_query 50000
 CONFIG SET default_timeout_ms 10000
-```
+CONFIG SET max_memory_mb 4096
 
-#### SHOW CONFIG — Display current limits
-
-```sql
 SHOW CONFIG
 ```
 
@@ -1411,50 +1021,26 @@ SHOW CONFIG
 
 ## Expressions & Operators
 
-Used in `WHERE` conditions and `SET` values.
-
 ### Comparison
 
 | Operator | Meaning |
-|----------|---------|
+| --- | --- |
 | `=` | Equal |
 | `!=` or `<>` | Not equal |
-| `<` | Less than |
-| `<=` | Less than or equal |
-| `>` | Greater than |
-| `>=` | Greater than or equal |
+| `<` / `<=` / `>` / `>=` | Numeric comparison |
 | `~` | Fuzzy text match (trigram similarity) |
 
 ### Logical
 
-| Operator | Meaning |
-|----------|---------|
-| `AND` | Both conditions must be true |
-| `OR` | Either condition must be true |
-| `NOT` | Negation |
+`AND` · `OR` · `NOT`
 
 ### Arithmetic
 
-| Operator | Meaning |
-|----------|---------|
-| `+` | Addition |
-| `-` | Subtraction |
-| `*` | Multiplication |
-| `/` | Division |
-
-**Examples:**
+`+` · `-` · `*` · `/`
 
 ```sql
--- Range condition
 GET users WHERE age >= 18 AND age <= 65 AND active = true
-
--- OR
 GET users WHERE name = "Alice" OR name = "Bob"
-
--- NOT
-GET users WHERE NOT active = true
-
--- Arithmetic in filter
 GET products WHERE price * 1.2 < 30.0
 ```
 
@@ -1462,9 +1048,9 @@ GET products WHERE price * 1.2 < 30.0
 
 ## Response Format
 
-All communication between the server and client uses **newline-terminated JSON**.
+All communication uses **newline-terminated JSON**.
 
-**Success — rows returned:**
+**Rows:**
 
 ```json
 {
@@ -1472,16 +1058,13 @@ All communication between the server and client uses **newline-terminated JSON**
   "result": {
     "Rows": {
       "columns": ["id", "name", "age"],
-      "rows": [
-        [1, "Alice", 30],
-        [2, "Bob",   25]
-      ]
+      "rows": [[1, "Alice", 30], [2, "Bob", 25]]
     }
   }
 }
 ```
 
-**Success — write operation:**
+**Write:**
 
 ```json
 {"status":"ok","result":{"Ok":{"message":"1 row inserted","elapsed_ms":0}}}
@@ -1497,9 +1080,11 @@ All communication between the server and client uses **newline-terminated JSON**
 
 ## Metrics
 
-After running some queries, `METRICS` returns a snapshot like this:
-
+```sql
+METRICS
 ```
+
+```text
 === PulseDB Metrics ===
 Uptime:                    5m 32s
 Queries total:             47
@@ -1521,48 +1106,97 @@ Latency (ms):
 
 ---
 
-## Architecture
+## Benchmarks
 
-![PulseDB System Architecture](docs/architecture.png)
+### Rust internal benchmarks (Criterion)
+
+12 benchmark groups covering every major operation:
+
+```bash
+cargo bench                          # all groups
+cargo bench -- insert                # single group
+cargo bench -- --save-baseline main  # save baseline
+cargo bench -- --baseline main       # diff against saved
+
+# HTML report: target/criterion/report/index.html
+```
+
+| Group | Scales |
+| --- | --- |
+| `insert` | 1K → 1M rows |
+| `point_lookup` | 10K / 100K / 1M dataset |
+| `range_scan` | 10% of 10K / 100K / 1M |
+| `full_scan` | Filter scan, 10K / 100K / 500K |
+| `aggregation` | GROUP BY + COUNT + AVG |
+| `order_limit` | ORDER BY + LIMIT 100 |
+| `fuzzy_search` | Trigram `~` operator |
+| `vector_search` | HNSW 128-dim cosine, k=10 |
+| `transaction` | 1 / 10 / 50 / 100 ops per tx |
+| `parser` | 8 query types, lex + parse only |
+| `mixed_80r_20w` | 80% reads / 20% writes |
+| `delete` | DEL WHERE 50% of rows |
+
+### Comparison benchmarks (Python)
+
+Compare PulseDB against PostgreSQL, MongoDB, Redis, and Qdrant:
+
+```bash
+pip install psycopg2-binary pymongo redis qdrant-client
+
+cd benchmarks
+
+# Quick run (100K rows, 100 concurrent)
+python run_all.py --skip-errors
+
+# Full run (1M rows, 1000 concurrent)
+python run_all.py --rows 1000000 --concurrency 1000 --skip-errors
+
+# 10M rows
+python run_all.py --rows 10000000 --concurrency 1000 --skip-errors
+
+# Single database
+python run_all.py --dbs pulsedb
+
+# Vector search comparison (PulseDB vs Qdrant)
+python run_all.py --dbs pulsedb qdrant --vec-rows 100000
+```
+
+**Operations measured:** INSERT · POINT LOOKUP · RANGE SCAN · FULL SCAN · AGGREGATION · ORDER BY LIMIT · FUZZY SEARCH · VECTOR SEARCH · CONCURRENT TPS
+
+All results include **TPS + p50 / p95 / p99 latency**. JSON output saved to `benchmarks/results/` for CI diffing.
+
+---
+
+## Architecture
 
 ```mermaid
 flowchart TD
     subgraph CLIENTS["CLIENT APPLICATIONS"]
-        direction LR
-        CLI["`**pulsedb-repl**
-        CLI`"]
-        REST["`**REST API**
-        clients`"]
-        CUSTOM["`**Custom**
-        applications`"]
+        CLI["pulsedb-repl"]
+        SDK["Python / Go / JS + ORMs"]
+        REST["REST API clients"]
+        ADM["Admin Dashboard"]
+        MIG["Migration Tool"]
     end
 
-    CLIENTS -->|TCP / HTTP communication| SERVER
+    CLIENTS -->|TCP — plain or TLS| SERVER
 
-    subgraph SERVER["🗄️  PulseDB SERVER"]
+    subgraph SERVER["PulseDB SERVER"]
         direction TB
-
         subgraph QE["QUERY ENGINE"]
-            direction LR
             P[Parser] --> PL[Planner] --> EX[Executor]
         end
-
-        subgraph TL["TRANSACTION LAYER  —  MVCC + WAL"]
+        subgraph TL["TRANSACTION LAYER — MVCC + WAL"]
         end
-
         subgraph SE["STORAGE ENGINE"]
-            direction LR
-            MEM[In-Memory Tables] --- IDX[Indexes]
+            MEM[In-Memory Tables] --- IDX[B-tree Indexes]
         end
-
         subgraph BG["BACKGROUND SERVICES"]
-            direction LR
             WAL[WAL Writer]
             SNAP[Snapshot Manager]
-            WATCH[Streaming Watch Engine]
-            RAFT[Cluster Manager Raft]
+            WATCH[Watch Engine]
+            RAFT[Cluster / Raft]
         end
-
         QE --> TL --> SE
         SE -.-> BG
     end
@@ -1571,70 +1205,65 @@ flowchart TD
 ### Layer Breakdown
 
 | Layer | Components | Responsibility |
-|-------|-----------|---------------|
-| **Query Engine** | `lexer` → `parser` → `planner` → `executor` | Parse PulseQL text, build AST, cost-estimate execution plan, run it |
-| **Transaction Layer** | `transaction.rs`, `mvcc.rs`, `wal.rs` | MVCC snapshot isolation, BEGIN/COMMIT/ROLLBACK, Write-Ahead Log |
-| **Storage Engine** | `table.rs`, `columnar.rs`, `buffer_pool.rs`, `lsm.rs` | In-memory B-tree tables, columnar compression, LRU page cache, LSM compaction |
-| **Background Services** | `wal.rs`, `persist.rs`, `watch.rs`, `cluster/` | WAL flushing, disk snapshots, streaming push events, Raft consensus |
+| --- | --- | --- |
+| **Query Engine** | `lexer` → `parser` → `planner` → `executor` | Parse PulseQL, build AST, cost-estimate plan, execute |
+| **Transaction Layer** | `transaction.rs`, `mvcc.rs`, `wal.rs` | MVCC snapshot isolation, BEGIN/COMMIT/ROLLBACK, WAL |
+| **Storage Engine** | `table.rs`, `columnar.rs`, `buffer_pool.rs`, `lsm.rs` | In-memory B-tree tables, columnar compression, LRU cache, LSM compaction |
+| **Background Services** | `wal.rs`, `persist.rs`, `watch.rs`, `cluster/` | WAL flush, disk snapshots, push subscriptions, Raft consensus |
 
-### Source Tree
+### Repository Structure
 
+```text
+src/                          — Rust server source
+├── main.rs                   — CLI, TLS setup, Windows Service
+├── server.rs                 — Async TCP listener, TLS handshake
+├── repl.rs                   — Interactive REPL client
+├── auth.rs                   — Argon2id passwords, RBAC
+├── wal.rs                    — Append-only WAL + AES-256-GCM encryption
+├── engine/                   — Query engine (executor, planner, evaluator, HNSW, watch)
+├── storage/                  — Storage engine (B-tree tables, columnar, LSM, buffer pool)
+├── cluster/                  — Raft consensus, shard routing, heartbeats
+├── triggers/                 — Event-driven trigger store
+├── api/                      — Auto-generated REST endpoints, API key auth, rate limiting
+├── graph/                    — GRAPH MATCH traversal
+└── ai/                       — FNV-1a hash projection for AI SEARCH
+
+clients/
+├── python/pulsedb/
+│   ├── __init__.py           — Raw TCP client
+│   └── orm.py                — Python ORM (Model, Field, QuerySet)
+├── go/
+│   ├── pulsedb.go            — Raw TCP client
+│   └── orm.go                — Go ORM (struct tags, NewORM, QueryBuilder)
+└── javascript/
+    ├── index.js              — Raw async TCP client
+    ├── orm.js                — JavaScript ORM (defineModel, DataTypes)
+    └── orm.d.ts              — TypeScript definitions
+
+tools/
+├── migrate.py                — Migration CLI (PostgreSQL / MySQL / SQLite / MongoDB)
+└── admin/
+    ├── server.py             — Admin dashboard HTTP server (Python stdlib)
+    └── index.html            — Dashboard frontend (vanilla HTML/CSS/JS, dark theme)
+
+benchmarks/
+├── run_all.py                — Master runner (all databases, comparison table + JSON)
+├── common.py                 — Shared timing / reporting utilities
+└── compare/
+    ├── pulsedb_bench.py      — PulseDB benchmark
+    ├── postgres_bench.py     — PostgreSQL benchmark
+    ├── mongodb_bench.py      — MongoDB benchmark
+    ├── redis_bench.py        — Redis benchmark
+    └── qdrant_bench.py       — Qdrant vector search benchmark
+
+benches/
+└── pulseql.rs                — Rust Criterion benchmarks (12 groups, up to 1M rows)
 ```
-pulsedb-server
-  ├── server.rs          — TCP listener; channel-based writer per connection
-  ├── auth.rs            — Users, Argon2id passwords, roles, per-table grants
-  ├── resource.rs        — Connection limits, row quotas, query deadlines
-  ├── sql/
-  │   ├── lexer.rs       — Tokeniser
-  │   ├── parser.rs      — Recursive-descent parser → AST
-  │   └── ast.rs         — Statement & expression types
-  ├── engine/
-  │   ├── executor.rs    — AST → storage ops; JOIN, GROUP BY, SIMILAR, auth dispatch
-  │   ├── evaluator.rs   — WHERE filter evaluation, trigram fuzzy search
-  │   ├── planner.rs     — Histogram-based cost planner (NDV + equi-depth buckets)
-  │   ├── hnsw.rs        — HNSW Approximate Nearest Neighbour index
-  │   └── watch.rs       — WatchRegistry: subscribe / unsubscribe / notify
-  ├── cluster/
-  │   ├── mod.rs         — ClusterRegistry: join/part/status/heartbeat tracking
-  │   ├── raft.rs        — Raft consensus: leader election + log replication
-  │   └── shard.rs       — ShardManager: FNV-1a hash routing
-  ├── triggers/
-  │   └── mod.rs         — TriggerStore: create/drop/match event-fired queries
-  ├── api/
-  │   └── mod.rs         — ApiStore: auto-generated HTTP/1.1 REST endpoints
-  ├── ai/
-  │   └── mod.rs         — FNV-1a hash projection for AI SEARCH (lexical, not semantic)
-  ├── graph/
-  │   └── mod.rs         — GRAPH MATCH: 3-way node-edge-node traversal
-  ├── storage/
-  │   ├── table.rs       — In-memory table store, B-tree indexes, histograms
-  │   ├── columnar.rs    — Dictionary / RLE / bitmap column compression
-  │   ├── persist.rs     — Disk catalog + snapshot save/recover; CHECKPOINT
-  │   ├── buffer_pool.rs — LRU page cache (8 KB pages)
-  │   └── lsm.rs         — MemTable → SSTable → compaction pipeline
-  ├── mvcc.rs            — Snapshot isolation (xmin/xmax per row)
-  ├── transaction.rs     — BEGIN/COMMIT/ROLLBACK with WAL integration
-  ├── wal.rs             — Append-only Write-Ahead Log
-  ├── metrics.rs         — Atomic counters + latency histogram
-  └── error.rs           — Unified error type
-```
-
-### WAL (Write-Ahead Log)
-
-Every mutation (`PUT`, `SET`, `DEL`) is written to `pulsedb.wal` before being applied in memory. On restart, the WAL is replayed to restore the last committed state.
-
-### Disk Snapshots
-
-In addition to the WAL, PulseDB periodically writes full data snapshots to the `--data-dir` directory. On startup, snapshots are loaded first, then the WAL tail is replayed on top.
-
-### WATCH Streaming
-
-Each `WATCH` subscriber gets a dedicated Tokio channel. When any mutation reaches the executor it calls `WatchRegistry::notify()`, which evaluates each subscriber's optional filter and sends matching events only. A background task per subscription drains the channel and writes event lines to the TCP connection — so the read loop and all watch tasks write concurrently without blocking each other.
 
 ### Columnar Compression
 
 | Encoding | Applied when |
-|----------|-------------|
+| --- | --- |
 | **Bitmap** | Boolean columns |
 | **Dictionary** | Low-cardinality text (≤ 256 distinct values per batch) |
 | **RLE** | Long runs of repeated values |
@@ -1642,7 +1271,7 @@ Each `WATCH` subscriber gets a dedicated Tokio channel. When any mutation reache
 
 ### Query Planner
 
-Uses **equi-depth histograms** (16 buckets per column) plus **Number of Distinct Values (NDV)** to estimate filter selectivity. Range predicates use fractional bucket coverage rather than a flat 1/NDV estimate. If an index scan is estimated to touch more rows than a full scan, the planner falls back to a full scan automatically.
+Uses equi-depth histograms (16 buckets/column) + NDV (Number of Distinct Values) to estimate filter selectivity. Falls back to full scan automatically if an index scan would touch more rows.
 
 ---
 
@@ -1662,39 +1291,35 @@ DEL t WHERE id = 1
 
 -- ── Read ──────────────────────────────────────────────────────────────
 GET t
-GET t WHERE val > 5.0
-GET t WHERE name = "Alice" AND val > 0
+GET t WHERE val > 5.0 AND name = "Alice"
 GET t ORDER BY val DESC LIMIT 10
 GET t TIMEOUT "5s"
 
--- ── Fuzzy text search ─────────────────────────────────────────────────
+-- ── Search ────────────────────────────────────────────────────────────
 FIND t WHERE name ~ "alic"
-
--- ── Vector similarity ─────────────────────────────────────────────────
 SIMILAR t ON emb TO [0.85, 0.15, 0.05] LIMIT 5
+AI SEARCH t "search phrase" LIMIT 5
 
--- ── Streaming subscriptions ───────────────────────────────────────────
-WATCH t WHERE val > 5.0          -- streams events until unwatch
-UNWATCH 1                         -- cancel subscription id=1
+-- ── Joins ─────────────────────────────────────────────────────────────
+GET users INNER JOIN orders ON users.id = orders.user_id
+GET users LEFT  JOIN orders ON users.id = orders.user_id WHERE orders.total > 10
+
+-- ── Aggregation ───────────────────────────────────────────────────────
+GET orders GROUP BY country COUNT(*) AS cnt SUM(total) AS revenue
+GET orders GROUP BY user_id AVG(total) AS avg ORDER BY avg DESC
+
+-- ── Streaming ─────────────────────────────────────────────────────────
+WATCH t WHERE val > 5.0
+UNWATCH 1
 
 -- ── Transactions ──────────────────────────────────────────────────────
 BEGIN
   PUT t { id: 10, name: "Test" }
   SET t { val: 1.0 } WHERE id = 10
 COMMIT
-
 ROLLBACK
 
--- ── Joins ─────────────────────────────────────────────────────────────
-GET users INNER JOIN orders ON users.id = orders.user_id
-GET users LEFT  JOIN orders ON users.id = orders.user_id WHERE orders.total > 10
-GET users RIGHT JOIN orders ON users.id = orders.user_id LIMIT 20
-
--- ── Aggregation ───────────────────────────────────────────────────────
-GET orders GROUP BY country COUNT(*) AS cnt SUM(total) AS revenue
-GET orders GROUP BY user_id AVG(total) AS avg ORDER BY avg DESC
-
--- ── Time travel ──────────────────────────────────────────────────────
+-- ── Time travel ───────────────────────────────────────────────────────
 GET t AS OF "2024-06-01T00:00:00Z"
 GET t VERSION 42
 
@@ -1705,9 +1330,6 @@ SHOW TRIGGERS
 
 -- ── Graph queries ─────────────────────────────────────────────────────
 GRAPH MATCH (a:people) -[rel:follows]-> (b:people) WHERE a.name = "Alice" LIMIT 10
-
--- ── AI search ─────────────────────────────────────────────────────────
-AI SEARCH t "search phrase" LIMIT 5
 
 -- ── REST API ──────────────────────────────────────────────────────────
 API GENERATE FOR users
@@ -1741,7 +1363,6 @@ SHOW CONFIG
 EXPLAIN GET t WHERE val > 5
 CHECKPOINT
 METRICS
-SHOW TABLES
 SHOW RUNNING QUERIES
 KILL QUERY 7
 ```
@@ -1752,72 +1373,82 @@ KILL QUERY 7
 
 ### "address already in use" — server won't start
 
-Another process is using port 7878. Stop that process, or start PulseDB on a different port:
-
 ```powershell
 pulsedb-server --addr 127.0.0.1:7879
 ```
 
 ### "connection refused" — REPL can't connect
 
-The server is not running. Start it first with `pulsedb-server`, then open the REPL.
+The server isn't running. Start it first:
 
-### "table does not exist" error
-
-The table hasn't been created yet. Run `MAKE TABLE` first, then use `PUT`/`GET`.
-
-### PUT silently replaces an existing row
-
-`PUT` is an upsert by design — if a row with the same primary key exists, it is replaced. Use `SET` to update specific fields without replacing the entire row.
-
-### Query timeout errors
-
-Increase the per-query timeout or the server-wide default:
-
-```sql
--- Per-query timeout
-GET big_table LIMIT 1000 TIMEOUT "30s"
-
--- Server-wide default
-CONFIG SET default_timeout_ms 30000
+```powershell
+pulsedb-server --no-auth
 ```
 
-### "not authenticated" or "permission denied" errors
+### "not authenticated" or "permission denied"
 
-Every connection must authenticate before running queries. Run `AUTH <user> '<password>'` immediately after connecting:
+Every connection must authenticate before running queries:
 
 ```sql
 AUTH admin 'your-password'
 ```
 
-If you've lost the admin password, restart the server with a new one:
+Lost the admin password? Restart with a new one:
 
 ```powershell
 $env:PULSEDB_ADMIN_PASSWORD = "new-strong-password"
 pulsedb-server
 ```
 
-For local development, start with `--no-auth` to skip authentication entirely:
+For local dev, skip auth entirely: `pulsedb-server --no-auth`
 
-```powershell
-pulsedb-server --no-auth
+### "table does not exist"
+
+```sql
+MAKE TABLE users (id int PRIMARY KEY, name text)
+```
+
+### PUT silently replaces an existing row
+
+`PUT` is an upsert by design. Use `SET` to update specific fields only.
+
+### Query timeout errors
+
+```sql
+GET big_table LIMIT 1000 TIMEOUT "30s"
+CONFIG SET default_timeout_ms 30000
 ```
 
 ### "GRAPH MATCH LIMIT cannot exceed 10000"
 
-Add or reduce the `LIMIT` clause on your `GRAPH MATCH` query. The hard cap is 10,000 rows per traversal to prevent memory exhaustion.
-
-### Windows Service — "access denied"
-
-Service commands require an **Administrator** terminal. Right-click PowerShell and choose "Run as Administrator".
+Reduce the `LIMIT` clause on your `GRAPH MATCH` query.
 
 ### WAL file growing very large
-
-Run a manual checkpoint to flush a full snapshot to disk and truncate the WAL:
 
 ```sql
 CHECKPOINT
 ```
+
+### Windows Service — "access denied"
+
+Right-click PowerShell → "Run as Administrator".
+
+### TLS — "connection refused" after enabling TLS
+
+```powershell
+pulsedb-repl --tls --tls-no-verify   # self-signed cert
+pulsedb-repl --tls                    # CA-signed cert
+```
+
+### Migration — "psycopg2 not found"
+
+```bash
+pip install psycopg2-binary
+```
+
+### Admin dashboard — "cannot reach PulseDB"
+
+Make sure the server is running: `pulsedb-server --no-auth`, then retry `python tools/admin/server.py --no-auth`.
 
 ---
 
@@ -1826,26 +1457,26 @@ CHECKPOINT
 PulseDB is licensed under the **Business Source License 1.1 (BUSL-1.1)**.
 
 | Use case | Allowed |
-|---|:-:|
+| --- | :-: |
 | Personal use, learning, experimentation | ✅ Free |
 | Open-source non-commercial projects | ✅ Free |
-| **30-day production trial** | ✅ Free |
+| 30-day production trial | ✅ Free |
 | Commercial production use (after trial) | ❌ Paid license required |
 
-On **March 11, 2030**, PulseDB automatically converts to the **Apache License 2.0** and becomes free for everyone, forever.
+On **March 11, 2030**, PulseDB automatically converts to the **Apache License 2.0** — free for everyone, forever.
 
 ### Commercial Licensing
 
 | Tier | Price | Includes |
-|---|---|---|
+| --- | --- | --- |
 | **Starter** | $500 / year | 1 server, 1 company |
 | **Business** | $2,000 / year | Up to 5 servers |
 | **Enterprise** | Contact us | Unlimited servers, priority support, SLA |
 
-**To purchase or enquire:**
+**Contact:**
 
-- **Email:** pulsedb.license@gmail.com
-- **Website:** [https://fornexus.tech](https://fornexus.tech)
+- **Email:** [pulsedb.license@gmail.com](mailto:pulsedb.license@gmail.com)
+- **Website:** <https://fornexus.tech>
 
 See the full [LICENSE](LICENSE) file for complete terms.
 
