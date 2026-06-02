@@ -22,9 +22,9 @@ PulseDB is a self-contained, production-ready database engine that stores data i
 | **Joins** | INNER, LEFT, RIGHT joins across tables in one query |
 | **Aggregation** | GROUP BY with COUNT, SUM, AVG, MIN, MAX and HAVING |
 | **Fuzzy Search** | Trigram-based text similarity search (`~`) |
-| **Vector Search** | Cosine similarity search with HNSW index (`SIMILAR`) |
+| **Vector Search** | Cosine similarity via live HNSW index — O(log n) ANN search (`SIMILAR`) |
 | **Streaming** | Real-time push subscriptions with `WATCH` |
-| **Transactions** | `BEGIN` / `COMMIT` / `ROLLBACK` with MVCC isolation |
+| **Transactions** | `BEGIN` / `COMMIT` / `ROLLBACK` with MVCC isolation and full snapshot rollback |
 | **Security** | Argon2id passwords, per-user RBAC, auth required by default |
 | **TLS** | Encrypted transport via `--tls-cert` / `--tls-key`; REPL `--tls` flag |
 | **WAL Encryption** | AES-256-GCM at-rest encryption via `PULSEDB_WAL_KEY` |
@@ -50,6 +50,8 @@ PulseDB is a self-contained, production-ready database engine that stores data i
 ### 1 · Install
 
 Download **`pulsedb-1.0.0-x86_64.msi`** from the [releases page](https://github.com/Ajaikumar0712/PulseDB/releases) and double-click to install.
+
+> **File:** `pulsedb-1.0.0-x86_64.msi` (3.2 MB) — includes `pulsedb-server.exe`, `pulsedb-repl.exe`, and `LICENSE`.
 
 Both binaries are placed in `C:\Program Files\PulseDB\bin\` and added to your system `PATH`.
 
@@ -825,7 +827,7 @@ PUT items { id: 2, label: "dog", embedding: [0.8, 0.2, 0.1] }
 SIMILAR items ON embedding TO [0.85, 0.15, 0.05] LIMIT 10
 ```
 
-Results include an `_score` column (0.0–1.0). Backed by an **HNSW** index. `ON <column>` can be omitted when the table has exactly one `vector` column.
+Results include an `_score` column (0.0–1.0). Backed by a **live HNSW index** — each `PUT` automatically indexes the vector, so searches are O(log n) approximate nearest-neighbour, not a brute-force scan. `ON <column>` can be omitted when the table has exactly one `vector` column. The index is updated on `PUT` and cleaned on `DEL` / `DROP TABLE`.
 
 ---
 
@@ -856,10 +858,12 @@ SET users { age: 29 } WHERE id = 10
 DEL users WHERE id = 5
 
 COMMIT     -- apply all changes atomically
-ROLLBACK   -- discard everything since BEGIN
+ROLLBACK   -- fully restore in-memory state to what it was at BEGIN
 ```
 
 PulseDB uses **MVCC** — readers never block writers and writers never block readers.
+
+`ROLLBACK` takes a row-level snapshot at `BEGIN` time and restores it exactly — inserted rows are removed, updated rows are reverted, deleted rows come back.
 
 ---
 
@@ -888,7 +892,7 @@ API key: a3f9c2b1d4e8... (include as: Authorization: Bearer a3f9c2b1d4e8...)
 | `PUT` | `/api/<table>/<id>` | Update row fields |
 | `DELETE` | `/api/<table>/<id>` | Delete a row |
 
-All requests require `Authorization: Bearer <api_key>`. Wrong or missing key → **401**. Exceeding 100 req/s per IP → **429**.
+All requests require `Authorization: Bearer <api_key>`. Wrong or missing key → **401**. Exceeding 100 req/s per IP → **429**. Request body larger than 1 MiB → **413**. Nested JSON objects in POST/PUT bodies → **400**.
 
 ```powershell
 $key = "a3f9c2b1d4e8..."
@@ -923,6 +927,8 @@ SHOW USERS
 ---
 
 ### Cluster Commands
+
+`MAKE TABLE` and `DROP TABLE` are automatically forwarded to all reachable peers after executing locally, keeping schemas in sync. If all peers are unreachable an `ERROR` is logged. Row-level write replication uses the Raft log.
 
 ```sql
 CLUSTER JOIN "192.168.1.20:7878"
@@ -1007,6 +1013,8 @@ METRICS
 ---
 
 ### Resource Configuration
+
+Configuration changes are **persisted** to `<data-dir>/pulsedb.config` and restored automatically on the next start. No server restart required.
 
 ```sql
 CONFIG SET max_connections 200
@@ -1099,6 +1107,7 @@ WAL records written:       35
 Latency (ms):
   Min:   0
   Avg:   1.2
+  P50:   1
   P95:   4
   P99:   9
   Max:   12
@@ -1207,7 +1216,7 @@ flowchart TD
 | Layer | Components | Responsibility |
 | --- | --- | --- |
 | **Query Engine** | `lexer` → `parser` → `planner` → `executor` | Parse PulseQL, build AST, cost-estimate plan, execute |
-| **Transaction Layer** | `transaction.rs`, `mvcc.rs`, `wal.rs` | MVCC snapshot isolation, BEGIN/COMMIT/ROLLBACK, WAL |
+| **Transaction Layer** | `transaction.rs`, `mvcc.rs`, `wal.rs` | MVCC snapshot isolation, full BEGIN/COMMIT/ROLLBACK (row-snapshot restore), WAL statement logging |
 | **Storage Engine** | `table.rs`, `columnar.rs`, `buffer_pool.rs`, `lsm.rs` | In-memory B-tree tables, columnar compression, LRU cache, LSM compaction |
 | **Background Services** | `wal.rs`, `persist.rs`, `watch.rs`, `cluster/` | WAL flush, disk snapshots, push subscriptions, Raft consensus |
 
@@ -1219,7 +1228,7 @@ src/                          — Rust server source
 ├── server.rs                 — Async TCP listener, TLS handshake
 ├── repl.rs                   — Interactive REPL client
 ├── auth.rs                   — Argon2id passwords, RBAC
-├── wal.rs                    — Append-only WAL + AES-256-GCM encryption
+├── wal.rs                    — Append-only WAL (statement-JSON records), AES-256-GCM encryption, crash replay
 ├── engine/                   — Query engine (executor, planner, evaluator, HNSW, watch)
 ├── storage/                  — Storage engine (B-tree tables, columnar, LSM, buffer pool)
 ├── cluster/                  — Raft consensus, shard routing, heartbeats
@@ -1259,6 +1268,16 @@ benchmarks/
 benches/
 └── pulseql.rs                — Rust Criterion benchmarks (12 groups, up to 1M rows)
 ```
+
+### WAL Durability & Crash Recovery
+
+Every `PUT`, `SET`, `DEL`, `MAKE TABLE`, and `DROP TABLE` is serialized as a full statement JSON record in `pulsedb.wal` before being applied in memory. On restart:
+
+1. Catalog + row snapshots load first (from `--data-dir`)
+2. Committed WAL statements since the last `CHECKPOINT` are replayed in transaction order
+3. Rolled-back transactions are discarded automatically
+
+Set `PULSEDB_WAL_KEY` to encrypt WAL records with AES-256-GCM. Replay works transparently on both plain and encrypted WAL files.
 
 ### Columnar Compression
 

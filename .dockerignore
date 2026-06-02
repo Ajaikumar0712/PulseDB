@@ -1,5 +1,5 @@
 target/
-flowdb-data/
+pulsedb-data/
 *.wal
 *.snap
 *.msi
@@ -10,5 +10,5 @@ benchmarks/
 .github/
 *.md
 wix/
-FlowDB_Documentation.docx
 test_queries.ps1
+.env

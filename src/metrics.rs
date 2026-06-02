@@ -201,6 +201,7 @@ impl Metrics {
     pub fn summary(&self) -> String {
         let uptime_secs = (Utc::now() - self.started_at).num_seconds();
         let mut lat = self.latency.lock().unwrap();
+        let p50 = lat.percentile(50.0);
         let p95 = lat.percentile(95.0);
         let p99 = lat.percentile(99.0);
         let avg = lat.avg_ms();
@@ -225,9 +226,10 @@ WAL records written  : {}
 Latency (ms)
   avg  : {avg:.2}
   min  : {min}
-  max  : {max}
+  p50  : {p50}
   p95  : {p95}
   p99  : {p99}
+  max  : {max}
 Running queries      : {running_count}
 "#,
             self.queries_total.load(Ordering::Relaxed),

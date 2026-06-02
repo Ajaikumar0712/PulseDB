@@ -1,5 +1,5 @@
 # ── Stage 1: Builder ──────────────────────────────────────────────────────
-FROM rust:1.81-slim AS builder
+FROM rust:1.85-slim AS builder
 
 # Install build dependencies (OpenSSL headers needed by some crates)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -26,6 +26,7 @@ FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a non-root user for the database process

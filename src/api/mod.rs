@@ -230,7 +230,16 @@ async fn handle_connection(
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(0);
 
-    // Read any remaining body bytes that haven't arrived yet
+    // Reject oversized bodies — prevents silent truncation and resource exhaustion.
+    const MAX_BODY: usize = 1024 * 1024; // 1 MiB
+    if content_length > MAX_BODY {
+        let _ = write_response(&mut stream, 413, "Content Too Large",
+            b"{\"error\":\"request body exceeds 1 MiB limit\"}").await;
+        return;
+    }
+
+    // Read any remaining body bytes that haven't arrived yet.
+    // Safe: content_length <= MAX_BODY <= buf.len(), so no overflow.
     let body_received = total.saturating_sub(header_end);
     if content_length > body_received {
         let still_needed = content_length - body_received;

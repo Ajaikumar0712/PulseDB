@@ -1,12 +1,12 @@
 Business Source License 1.1
 
 Licensor:             Ajaikumar, ForNexus (https://fornexus.tech)
-Licensed Work:        FlowDB and FlowQL Query Language, Version 0.2.0 or later
+Licensed Work:        PulseDB and PulseQL Query Language, Version 1.0.0 or later
                       (the "Licensed Work" is © 2026 Ajaikumar, ForNexus)
 Additional Use Grant: You may make production use of the Licensed Work,
                       provided that such use does not include offering the
                       Licensed Work to third parties on a hosted or embedded
-                      basis that competes with FlowDB's commercial offerings.
+                      basis that competes with PulseDB's commercial offerings.
 
                       FREE TRIAL: Any individual or organization may use the
                       Licensed Work in a production environment for up to
@@ -69,10 +69,10 @@ COMMERCIAL LICENSING
 
 To obtain a commercial license for production use, contact:
 
-  Email:   flowdb.license@gmail.com
-  Website: https://fornexus.tech
+  Email:   pulsedb.license@gmail.com
+  Website: fornexus.tech
 
-FlowDB is a product of ForNexus. Commercial licenses are available for:
+PulseDB is a product of ForNexus. Commercial licenses are available for:
 
   Starter     — $500 / year    — up to 1 server, 1 company
   Business    — $2,000 / year  — up to 5 servers

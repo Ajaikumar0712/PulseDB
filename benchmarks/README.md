@@ -209,4 +209,4 @@ Python: 3.11+
 - Averages are **median of 5+ runs**, first call is discarded as warm-up
 - Concurrent tests use a **barrier** so all threads start simultaneously
 - PulseDB advantages: no disk I/O, integrated vector/fuzzy search, no ORM overhead
-- PulseDB limitations: single-process, no horizontal sharding in v0.2, WAL-only durability
+- PulseDB limitations: single-process, no horizontal sharding in v1.0, WAL-only durability

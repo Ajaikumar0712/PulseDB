@@ -59,14 +59,6 @@
                               KeyPath='yes'/>
                     </Component>
 
-                    <Component Id='Documentation' Guid='C4E3B092-55ED-4F3C-AD4E-8B2C7F6A1E93'>
-                        <File Id='DocFile'
-                              Name='PulseDB_Documentation.docx'
-                              DiskId='1'
-                              Source='PulseDB_Documentation.docx'
-                              KeyPath='yes'/>
-                    </Component>
-
                     <Directory Id='Bin' Name='bin'>
                         <Component Id='Path' Guid='AD19F86C-CD1C-4DC2-BA1C-6D7DA5B1D5B0' KeyPath='yes'>
                             <Environment
@@ -102,7 +94,7 @@
         <Feature
             Id='Binaries'
             Title='PulseDB Application'
-            Description='Installs the PulseDB server, REPL, license, and documentation.'
+            Description='Installs the PulseDB server, REPL, and license.'
             Level='1'
             ConfigurableDirectory='APPLICATIONFOLDER'
             AllowAdvertise='no'
@@ -110,7 +102,6 @@
             Absent='disallow'>
 
             <ComponentRef Id='License'/>
-            <ComponentRef Id='Documentation'/>
             <ComponentRef Id='binary0'/>
             <ComponentRef Id='binary1'/>
 

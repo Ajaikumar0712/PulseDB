@@ -208,6 +208,44 @@ pub(crate) fn run_server(
         std::process::exit(1);
     }
 
+    // Replay committed WAL statements written since the last checkpoint.
+    // This reconstructs mutations that occurred after the most recent snapshot.
+    {
+        use crate::wal::{read_wal, committed_statements};
+        use crate::engine::executor::Executor;
+
+        match read_wal(&wal_path) {
+            Ok(records) if !records.is_empty() => {
+                let stmts_json = committed_statements(records);
+                if !stmts_json.is_empty() {
+                    info!("WAL replay: {} committed statements to apply", stmts_json.len());
+                    let replay_exec = Executor::new(Arc::clone(&db), Arc::clone(&metrics));
+                    let mut replayed = 0usize;
+                    let mut errors   = 0usize;
+                    for stmt_json in stmts_json {
+                        match serde_json::from_value::<crate::sql::ast::Stmt>(stmt_json) {
+                            Ok(stmt) => {
+                                if let Err(e) = replay_exec.execute(stmt) {
+                                    tracing::warn!("WAL replay error (skipping): {e}");
+                                    errors += 1;
+                                } else {
+                                    replayed += 1;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("WAL replay: stmt deserialize error — {e}");
+                                errors += 1;
+                            }
+                        }
+                    }
+                    info!("WAL replay complete: {replayed} applied, {errors} skipped");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("WAL replay skipped (read error): {e}"),
+        }
+    }
+
     // Build auth manager — secure by default, open only with --no-auth.
     // Password precedence: --admin-password flag → PULSEDB_ADMIN_PASSWORD env → generated.
     let admin_password = admin_password
@@ -232,6 +270,15 @@ pub(crate) fn run_server(
 
     let watch_registry   = Arc::new(WatchRegistry::new());
     let cluster_registry = Arc::new(ClusterRegistry::new());
+
+    // Load persisted runtime config (CONFIG SET values survive restarts).
+    {
+        use crate::engine::executor::Executor;
+        let config_loader = Executor::with_data_dir(
+            Arc::clone(&db), Arc::clone(&metrics), data_dir.clone(),
+        );
+        config_loader.load_config();
+    }
 
     let mut srv = Server::new(db, wal, metrics, addr)
         .with_data_dir(data_dir)
@@ -266,6 +313,19 @@ pub(crate) fn run_server(
         .build()
         .expect("tokio runtime")
         .block_on(async move {
+            // Background MVCC vacuum: prune the committed-tx set every 60 s
+            // to prevent unbounded memory growth from long-running servers.
+            {
+                use crate::mvcc::MvccManager;
+                let mvcc = Arc::new(MvccManager::new());
+                tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                        mvcc.vacuum();
+                    }
+                });
+            }
+
             // Background heartbeat task: probe each cluster peer every 10 s.
             let cr = Arc::clone(&cluster_registry);
             tokio::spawn(async move {
@@ -517,6 +577,7 @@ mod service_mgmt {
     use std::net::SocketAddr;
     use std::path::PathBuf;
 
+    #[allow(unused_variables)]
     pub fn install(addr: &SocketAddr, wal: &PathBuf, log_level: &str) {
         #[cfg(windows)]
         {

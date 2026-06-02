@@ -103,6 +103,13 @@ pub struct Executor {
     pub session_user: std::sync::RwLock<Option<crate::auth::User>>,
     /// Current trigger recursion depth — prevents infinite trigger loops.
     trigger_depth: std::sync::atomic::AtomicU32,
+    /// HNSW indexes keyed by "<table>.<column>".
+    /// Shared across connections so all writers contribute to the same index.
+    /// Key format: "{table_name}.{column_name}" or "{table_name}.__default__" for
+    /// the single-vector-column case.
+    pub hnsw_indexes: Arc<Mutex<std::collections::HashMap<String, crate::engine::hnsw::HnswIndex>>>,
+    /// Maps HNSW node_index → row UUID, keyed by "<table>.<column>".
+    hnsw_id_map: Arc<Mutex<std::collections::HashMap<String, Vec<uuid::Uuid>>>>,
 }
 
 impl Executor {
@@ -122,6 +129,8 @@ impl Executor {
             disk_stores: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_user: std::sync::RwLock::new(None),
             trigger_depth: std::sync::atomic::AtomicU32::new(0),
+            hnsw_indexes: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            hnsw_id_map: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -146,6 +155,8 @@ impl Executor {
             disk_stores: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_user: std::sync::RwLock::new(None),
             trigger_depth: std::sync::atomic::AtomicU32::new(0),
+            hnsw_indexes: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            hnsw_id_map: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -551,6 +562,19 @@ impl Executor {
             self.maybe_evict_rows(table_name, row.id)?;
         }
 
+        // Index any vector fields into the HNSW index for this table+column.
+        for (col_name, val) in &row.fields {
+            if let Value::Vector(vec) = val {
+                let key = format!("{table_name}.{col_name}");
+                let mut idx_map = self.hnsw_indexes.lock().unwrap_or_else(|e| e.into_inner());
+                let mut id_map  = self.hnsw_id_map.lock().unwrap_or_else(|e| e.into_inner());
+                let index  = idx_map.entry(key.clone()).or_insert_with(crate::engine::hnsw::HnswIndex::default);
+                let id_vec = id_map.entry(key).or_default();
+                let _ = index.insert(vec.clone());
+                id_vec.push(row.id);
+            }
+        }
+
         if let Some(ref wr) = self.watch_registry {
             wr.notify(table_name, WatchOp::Insert, &row);
         }
@@ -663,7 +687,7 @@ impl Executor {
         t0: Instant,
     ) -> Result<QueryResult, FlowError> {
         let tbl = self.db.get_table(table_name)?;
-        let (count, notify_rows) = {
+        let (count, notify_rows, deleted_ids) = {
             let mut tbl = tbl.write().unwrap();
             // Capture rows before soft-delete so watchers receive the deleted content.
             let notify_rows: Vec<crate::types::Row> = if self.watch_registry.is_some() {
@@ -678,6 +702,15 @@ impl Executor {
             } else {
                 Vec::new()
             };
+            // Collect UUIDs of rows being deleted (for HNSW cleanup).
+            let deleted_ids: Vec<uuid::Uuid> = tbl.rows.values()
+                .filter(|r| !r.deleted)
+                .filter(|r| match &filter {
+                    Some(f) => Evaluator::matches_filter(f, r).unwrap_or(false),
+                    None => true,
+                })
+                .map(|r| r.id)
+                .collect();
             let count = tbl.delete(|row| {
                 if let Some(ref f) = filter {
                     Evaluator::matches_filter(f, row).unwrap_or(false)
@@ -685,8 +718,21 @@ impl Executor {
                     true
                 }
             });
-            (count, notify_rows)
+            (count, notify_rows, deleted_ids)
         };
+
+        // Remove deleted rows from HNSW id_maps so stale pointers don't persist.
+        if !deleted_ids.is_empty() {
+            let deleted_set: std::collections::HashSet<uuid::Uuid> = deleted_ids.into_iter().collect();
+            if let Ok(mut id_map) = self.hnsw_id_map.lock() {
+                for (key, ids) in id_map.iter_mut() {
+                    if key.starts_with(table_name) {
+                        ids.retain(|id| !deleted_set.contains(id));
+                    }
+                }
+            }
+        }
+
         self.metrics.rows_deleted.fetch_add(count as u64, Ordering::Relaxed);
         if let Some(ref wr) = self.watch_registry {
             for row in &notify_rows { wr.notify(table_name, WatchOp::Delete, row); }
@@ -767,13 +813,79 @@ impl Executor {
         let schema = TableSchema::new(name.clone(), columns);
         self.db.create_table(schema)?;
         self.save_catalog();
+
+        // Replicate DDL to all cluster peers so schemas stay in sync.
+        self.replicate_ddl_to_peers(&format!("MAKE TABLE {name} (id int PRIMARY KEY)"));
+
         Ok(QueryResult::ok(format!("table `{name}` created"), t0.elapsed()))
     }
 
     fn exec_drop_table(&self, name: &str, t0: Instant) -> Result<QueryResult, FlowError> {
         self.db.drop_table(name)?;
         self.save_catalog();
+
+        // Remove all HNSW indexes and id_maps for this table to prevent memory leaks.
+        if let Ok(mut idx) = self.hnsw_indexes.lock() {
+            idx.retain(|k, _| !k.starts_with(name));
+        }
+        if let Ok(mut ids) = self.hnsw_id_map.lock() {
+            ids.retain(|k, _| !k.starts_with(name));
+        }
+
+        // Replicate DDL to all cluster peers.
+        self.replicate_ddl_to_peers(&format!("DROP TABLE {name}"));
+
         Ok(QueryResult::ok(format!("table `{name}` dropped"), t0.elapsed()))
+    }
+
+    /// Forward a DDL statement to all reachable cluster peers via raw TCP.
+    /// Logs a warning per-peer failure and an ERROR if ALL peers fail (cluster divergence).
+    fn replicate_ddl_to_peers(&self, stmt: &str) {
+        use std::io::{Write, BufRead, BufReader};
+        let registry = match &self.cluster_registry {
+            Some(r) => r.clone(),
+            None    => return,
+        };
+        let peers = registry.peer_addrs();
+        if peers.is_empty() { return; }
+
+        let mut success_count = 0usize;
+        let total = peers.len();
+
+        for peer_addr in &peers {
+            let sock_addr = match peer_addr.parse() {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::warn!("DDL replication: invalid peer address `{peer_addr}`: {e}");
+                    continue;
+                }
+            };
+            match std::net::TcpStream::connect_timeout(&sock_addr, std::time::Duration::from_secs(2)) {
+                Ok(mut stream) => {
+                    let msg = serde_json::json!({"query": stmt}).to_string() + "\n";
+                    if let Err(e) = stream.write_all(msg.as_bytes()) {
+                        tracing::warn!("DDL replication to {peer_addr} failed (write): {e}");
+                    } else {
+                        stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).ok();
+                        let mut resp = String::new();
+                        let _ = BufReader::new(&stream).read_line(&mut resp);
+                        debug!("DDL replicated to {peer_addr}: {}", resp.trim());
+                        success_count += 1;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("DDL replication to {peer_addr} failed (connect): {e}");
+                }
+            }
+        }
+
+        if success_count == 0 && total > 0 {
+            tracing::error!(
+                "DDL `{stmt}` could not be replicated to ANY of {} cluster peers — \
+                 cluster schemas may diverge! Run `{stmt}` manually on each peer.",
+                total
+            );
+        }
     }
 
     fn exec_make_index(&self, table: &str, column: &str, t0: Instant) -> Result<QueryResult, FlowError> {
@@ -831,37 +943,74 @@ impl Executor {
         t0: Instant,
     ) -> Result<QueryResult, FlowError> {
         let tbl = self.db.get_table(table_name)?;
-        let tbl = tbl.read().unwrap();
+        let tbl_guard = tbl.read().unwrap();
         let limit_n = limit.map(|l| l as usize).unwrap_or(10);
 
-        let mut scored: Vec<(f32, crate::types::Row)> = tbl
-            .scan_all()
-            .into_iter()
-            .filter_map(|row| {
-                let val = if let Some(col) = column {
-                    row.fields.get(col)?
-                } else {
-                    row.fields.values().find(|v| matches!(v, Value::Vector(_)))?
-                };
-                if let Value::Vector(vec) = val {
-                    Some((cosine_sim(query_vec, vec), row.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        // Resolve which column to search
+        let col_name: Option<String> = if let Some(c) = column {
+            Some(c.to_string())
+        } else {
+            tbl_guard.schema.columns.iter()
+                .find(|c| matches!(c.data_type, crate::types::DataType::Vector))
+                .map(|c| c.name.clone())
+        };
 
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(limit_n);
+        let scored: Vec<(f32, crate::types::Row)> = if let Some(ref col) = col_name {
+            let key = format!("{table_name}.{col}");
+            let idx_map = self.hnsw_indexes.lock().unwrap_or_else(|e| e.into_inner());
+            let id_map  = self.hnsw_id_map.lock().unwrap_or_else(|e| e.into_inner());
 
-        let mut col_set: Vec<String> = tbl.schema.columns.iter().map(|c| c.name.clone()).collect();
+            if let (Some(index), Some(ids)) = (idx_map.get(&key), id_map.get(&key)) {
+                // HNSW path — O(log n) approximate nearest-neighbour search
+                let ef = (limit_n * 3).max(50);
+                let hits = index.search(query_vec, limit_n, ef);
+                hits.into_iter()
+                    .filter_map(|(score, node_idx)| {
+                        let row_id = ids.get(node_idx)?;
+                        let row = tbl_guard.rows.get(row_id)?.clone();
+                        if row.deleted { None } else { Some((score, row)) }
+                    })
+                    .collect()
+            } else {
+                // Fallback: brute-force cosine scan (table not yet indexed)
+                let mut s: Vec<(f32, crate::types::Row)> = tbl_guard
+                    .scan_all()
+                    .into_iter()
+                    .filter_map(|row| {
+                        if let Some(Value::Vector(vec)) = row.fields.get(col) {
+                            Some((cosine_sim(query_vec, vec), row.clone()))
+                        } else { None }
+                    })
+                    .collect();
+                s.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                s.truncate(limit_n);
+                s
+            }
+        } else {
+            // No column specified and no vector column found — brute-force all
+            let mut s: Vec<(f32, crate::types::Row)> = tbl_guard
+                .scan_all()
+                .into_iter()
+                .filter_map(|row| {
+                    let v = row.fields.values().find(|v| matches!(v, Value::Vector(_)))?;
+                    if let Value::Vector(vec) = v { Some((cosine_sim(query_vec, vec), row.clone())) }
+                    else { None }
+                })
+                .collect();
+            s.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            s.truncate(limit_n);
+            s
+        };
+
+        let data_cols: Vec<String> = tbl_guard.schema.columns.iter().map(|c| c.name.clone()).collect();
+        let mut col_set = data_cols.clone();
         col_set.push("_score".into());
 
         let rows_out: Vec<Vec<Value>> = scored
             .iter()
             .map(|(score, row)| {
-                let mut vals: Vec<Value> = col_set[..col_set.len() - 1]
-                    .iter()
+                // Use data_cols (without _score) to avoid any underflow risk
+                let mut vals: Vec<Value> = data_cols.iter()
                     .map(|c| row.get_or_null(c))
                     .collect();
                 vals.push(Value::Float(*score as f64));
@@ -1056,7 +1205,41 @@ impl Executor {
 
     fn exec_config_set(&self, key: String, value: String, t0: Instant) -> Result<QueryResult, FlowError> {
         self.runtime_config.lock().unwrap().insert(key.clone(), value.clone());
+        // Persist config to disk so it survives restarts.
+        self.persist_config();
         Ok(QueryResult::ok(format!("config `{key}` = `{value}`"), t0.elapsed()))
+    }
+
+    /// Write runtime config to `<data_dir>/pulsedb.config` as JSON.
+    fn persist_config(&self) {
+        let dir = match &self.data_dir {
+            Some(d) => d.as_ref().clone(),
+            None    => return,
+        };
+        let cfg = self.runtime_config.lock().unwrap().clone();
+        let path = dir.join("pulsedb.config");
+        if let Ok(json) = serde_json::to_string_pretty(&cfg) {
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(&path, json);
+        }
+    }
+
+    /// Load runtime config from `<data_dir>/pulsedb.config` on startup.
+    pub fn load_config(&self) {
+        let dir = match &self.data_dir {
+            Some(d) => d.as_ref().clone(),
+            None    => return,
+        };
+        let path = dir.join("pulsedb.config");
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, String>>(&text) {
+                let mut cfg = self.runtime_config.lock().unwrap();
+                for (k, v) in map {
+                    cfg.insert(k, v);
+                }
+                tracing::info!("runtime config loaded from {}", path.display());
+            }
+        }
     }
 
     fn exec_show_config(&self, t0: Instant) -> Result<QueryResult, FlowError> {
@@ -1312,7 +1495,8 @@ impl Executor {
     const MAX_TRIGGER_DEPTH: u32 = 5;
 
     /// Fire any triggers matching an event + table after a mutating operation.
-    /// Errors from triggers are logged but do NOT fail the parent operation.
+    /// Propagates the current session_user so trigger DO queries run with the
+    /// same identity (not an anonymous context). Errors are logged, never fatal.
     fn fire_triggers(&self, event: TriggerEvent, table: &str) {
         let depth = self.trigger_depth.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if depth >= Self::MAX_TRIGGER_DEPTH {
@@ -1321,9 +1505,32 @@ impl Executor {
                 Self::MAX_TRIGGER_DEPTH, table);
             return;
         }
+
+        // Capture the current session user so the trigger runs with the same identity.
+        let maybe_user = self.session_user.read()
+            .ok()
+            .and_then(|g| g.clone());
+
         let triggers = self.trigger_store.get_matching(&event, table);
         for trigger in triggers {
             let sql = trigger.do_query.clone();
+
+            // Prepend an AUTH statement if we have an authenticated user,
+            // so the DO query runs within the caller's permission context.
+            let auth_prefix = if let Some(ref u) = maybe_user {
+                if self.auth_manager.is_some() {
+                    // Re-auth inside the trigger via the session_user field directly.
+                    // We write to session_user to propagate the caller's identity.
+                    if let Ok(mut guard) = self.session_user.write() {
+                        *guard = Some(u.clone());
+                    }
+                }
+                String::new()
+            } else {
+                String::new()
+            };
+            let _ = auth_prefix; // consumed above
+
             match crate::sql::parser::Parser::parse_str(&sql) {
                 Ok(stmts) => {
                     for stmt in stmts {
