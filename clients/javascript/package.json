@@ -1,6 +1,6 @@
 {
   "name": "@pulsedb/client",
-  "version": "1.0.0",
+  "version": "0.2.0",
   "description": "JavaScript/Node.js client for PulseDB",
   "main": "index.js",
   "license": "BUSL-1.1",

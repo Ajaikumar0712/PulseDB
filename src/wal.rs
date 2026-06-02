@@ -63,14 +63,6 @@ pub enum WalRecord {
     CreateTable { tx_id: u64, table: String },
     /// DDL: a table was dropped.
     DropTable { tx_id: u64, table: String },
-    /// Statement-level record — stores the full serialized Stmt for crash replay.
-    /// Replaces the empty-fields placeholders. On recovery, committed statements
-    /// are deserialized and re-executed through the executor.
-    Statement {
-        tx_id: u64,
-        stmt_json: serde_json::Value,
-        timestamp: DateTime<Utc>,
-    },
 }
 
 impl WalRecord {
@@ -84,61 +76,8 @@ impl WalRecord {
             WalRecord::Rollback { tx_id } => *tx_id,
             WalRecord::CreateTable { tx_id, .. } => *tx_id,
             WalRecord::DropTable { tx_id, .. } => *tx_id,
-            WalRecord::Statement { tx_id, .. } => *tx_id,
         }
     }
-}
-
-/// Extract all committed Stmt records from WAL records in order.
-/// Skips rolled-back transactions and returns only mutation statements
-/// (Put, Set, Del, MakeTable, DropTable) from committed transactions.
-pub fn committed_statements(
-    records: Vec<WalRecord>,
-) -> Vec<serde_json::Value> {
-    use std::collections::{HashMap, HashSet};
-
-    let mut buffered: HashMap<u64, Vec<serde_json::Value>> = HashMap::new();
-    let mut committed: HashSet<u64> = HashSet::new();
-    let mut rolled_back: HashSet<u64> = HashSet::new();
-
-    for rec in records {
-        match rec {
-            WalRecord::Begin { tx_id } => {
-                buffered.entry(tx_id).or_default();
-            }
-            WalRecord::Statement { tx_id, stmt_json, .. } => {
-                buffered.entry(tx_id).or_default().push(stmt_json);
-            }
-            WalRecord::CreateTable { tx_id, ref table } => {
-                // Legacy DDL records (pre-Statement variant) — reconstruct minimal stmt JSON
-                let json = serde_json::json!({ "MakeTable": { "name": table, "columns": [] } });
-                buffered.entry(tx_id).or_default().push(json);
-            }
-            WalRecord::DropTable { tx_id, ref table } => {
-                let json = serde_json::json!({ "DropTable": { "name": table } });
-                buffered.entry(tx_id).or_default().push(json);
-            }
-            WalRecord::Commit { tx_id, .. } => {
-                committed.insert(tx_id);
-            }
-            WalRecord::Rollback { tx_id } => {
-                rolled_back.insert(tx_id);
-                buffered.remove(&tx_id);
-            }
-            _ => {}
-        }
-    }
-
-    // Sort committed tx_ids in ascending order so statements are replayed in
-    // the same order they were originally executed (not random HashMap order).
-    let mut sorted_committed: Vec<u64> = committed.into_iter().collect();
-    sorted_committed.sort_unstable();
-
-    sorted_committed
-        .into_iter()
-        .filter_map(|tx_id| buffered.remove(&tx_id))
-        .flatten()
-        .collect()
 }
 
 // ── Wal writer ────────────────────────────────────────────────────────────
@@ -227,7 +166,6 @@ fn record_op_name(r: &WalRecord) -> &'static str {
         WalRecord::Rollback { .. }    => "ROLLBACK",
         WalRecord::CreateTable { .. } => "CREATE_TABLE",
         WalRecord::DropTable { .. }   => "DROP_TABLE",
-        WalRecord::Statement { .. }   => "STATEMENT",
     }
 }
 

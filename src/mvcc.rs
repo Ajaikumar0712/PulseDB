@@ -62,18 +62,8 @@ impl MvccManager {
     /// so they are invisible to all future snapshots.
     pub fn abort(&self, txn_id: TxnId) {
         self.active.write().unwrap().remove(&txn_id);
-        // Writes are dead (xmin not in committed set) and will be pruned by vacuum().
-    }
-
-    /// Remove committed transaction IDs that are older than the oldest active
-    /// transaction. This prevents the `committed` set from growing unbounded.
-    /// Call periodically from a background task.
-    pub fn vacuum(&self) {
-        let active = self.active.read().unwrap();
-        let oldest_active = active.iter().copied().min().unwrap_or(u64::MAX);
-        drop(active);
-        // Prune committed IDs that no active snapshot could ever need to check.
-        self.committed.write().unwrap().retain(|&id| id >= oldest_active);
+        // Do NOT add to committed; writes are dead but they stay in storage
+        // and will be vacuumed away by a background VACUUM (future work).
     }
 
     /// Check whether a transaction ID is committed.
