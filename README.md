@@ -1482,4 +1482,4 @@ See the full [LICENSE](LICENSE) file for complete terms.
 
 ---
 
-*PulseDB is a product of [ForNexus](https://fornexus.tech), developed by Ajaikumar.*
+*PulseDB is a product of [ForNexus](https://fornexus.tech), developed by Ajaikumar, with contribution from [Gayu-0707](https://github.com/Gayu-0707).*
