@@ -94,21 +94,49 @@ class PulseDB:
                 print(row.id, row.name)
     """
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 7878) -> None:
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 7878,
+        tls: bool = False,
+        tls_verify: bool = True,
+        tls_ca_cert: Optional[str] = None,
+    ) -> None:
         self.host = host
         self.port = port
+        self._tls = tls
+        self._tls_verify = tls_verify
+        self._tls_ca_cert = tls_ca_cert
         self._sock: Optional[socket.socket] = None
         self._file = None
 
     @classmethod
-    def connect(cls, host: str = "127.0.0.1", port: int = 7878) -> "PulseDB":
-        client = cls(host, port)
+    def connect(
+        cls,
+        host: str = "127.0.0.1",
+        port: int = 7878,
+        tls: bool = False,
+        tls_verify: bool = True,
+        tls_ca_cert: Optional[str] = None,
+    ) -> "PulseDB":
+        client = cls(host, port, tls=tls, tls_verify=tls_verify, tls_ca_cert=tls_ca_cert)
         client._connect()
         return client
 
     def _connect(self) -> None:
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._sock.connect((self.host, self.port))
+        raw = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        raw.connect((self.host, self.port))
+        if self._tls:
+            import ssl
+            ctx = ssl.create_default_context()
+            if not self._tls_verify:
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+            if self._tls_ca_cert:
+                ctx.load_verify_locations(self._tls_ca_cert)
+            self._sock = ctx.wrap_socket(raw, server_hostname=self.host)
+        else:
+            self._sock = raw
         self._file = self._sock.makefile("r", encoding="utf-8")
 
     def auth(self, username: str, password: str) -> "PulseDB":

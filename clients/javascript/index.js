@@ -1,6 +1,7 @@
 'use strict';
 
 const net = require('net');
+const tls = require('tls');
 
 class PulseDBError extends Error {
   constructor(message) {
@@ -39,12 +40,18 @@ class Result {
 class PulseDB {
   /**
    * @param {object} [opts]
-   * @param {string} [opts.host='127.0.0.1']
-   * @param {number} [opts.port=7878]
+   * @param {string}  [opts.host='127.0.0.1']
+   * @param {number}  [opts.port=7878]
+   * @param {boolean} [opts.tls=false]           Enable TLS encryption
+   * @param {boolean} [opts.tlsNoVerify=false]   Skip cert verification (self-signed, dev only)
+   * @param {string}  [opts.tlsCaCert]           Path to CA certificate file
    */
   constructor(opts = {}) {
     this.host = opts.host || '127.0.0.1';
     this.port = opts.port || 7878;
+    this._tls = !!opts.tls;
+    this._tlsNoVerify = !!opts.tlsNoVerify;
+    this._tlsCaCert = opts.tlsCaCert || null;
     this._socket = null;
     this._buffer = '';
     this._pending = [];
@@ -52,6 +59,7 @@ class PulseDB {
 
   /**
    * Connect and return the client.
+   * @param {object} [opts]
    * @returns {Promise<PulseDB>}
    */
   static async connect(opts = {}) {
@@ -62,10 +70,20 @@ class PulseDB {
 
   _connect() {
     return new Promise((resolve, reject) => {
-      const sock = net.createConnection({ host: this.host, port: this.port }, () => {
-        this._socket = sock;
-        resolve(this);
-      });
+      const connOpts = { host: this.host, port: this.port };
+
+      // Build TLS options if enabled
+      if (this._tls) {
+        if (this._tlsNoVerify) connOpts.rejectUnauthorized = false;
+        if (this._tlsCaCert) {
+          const fs = require('fs');
+          connOpts.ca = fs.readFileSync(this._tlsCaCert);
+        }
+      }
+
+      const sock = this._tls
+        ? tls.connect(connOpts, () => { this._socket = sock; resolve(this); })
+        : net.createConnection(connOpts, () => { this._socket = sock; resolve(this); });
 
       sock.setEncoding('utf8');
 

@@ -244,6 +244,7 @@ where
             exec.trigger_store = trigger_store;
             exec.api_store = api_store;
             exec.auth_manager = Some(Arc::clone(&auth_manager));
+            exec.wal = Some(Arc::clone(&wal));
             Arc::new(exec)
         }
         None => {
@@ -255,6 +256,7 @@ where
             exec.trigger_store = trigger_store;
             exec.api_store = api_store;
             exec.auth_manager = Some(Arc::clone(&auth_manager));
+            exec.wal = Some(Arc::clone(&wal));
             Arc::new(exec)
         }
     };

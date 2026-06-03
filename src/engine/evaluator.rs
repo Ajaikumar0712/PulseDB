@@ -26,6 +26,16 @@ impl Evaluator {
                 Ok(Value::Bool(!v.is_truthy()))
             }
 
+            Expr::InSubquery { column, .. } => {
+                // Subquery evaluation happens in the executor before eval() is called.
+                // The executor materialises the subquery result set and rewrites
+                // InSubquery into a series of BinOp::Eq / BinOp::Or comparisons.
+                // This fallback returns false so rows are conservatively excluded
+                // when the rewrite hasn't been applied.
+                let _ = Self::resolve_column(column);
+                Ok(Value::Bool(false))
+            }
+
             Expr::Fuzzy { column, pattern } => {
                 let col_name = Self::resolve_column(column);
                 let val = row.get_or_null(&col_name);

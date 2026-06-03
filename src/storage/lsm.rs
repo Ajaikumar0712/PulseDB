@@ -424,6 +424,39 @@ impl LsmTree {
     }
 }
 
+// ── Background compaction worker ──────────────────────────────────────────
+
+/// Spawn a Tokio task that runs LSM compaction on a fixed interval.
+///
+/// The task wakes every `interval` seconds and calls `lsm.compact()` if the
+/// number of L0 SSTables exceeds the threshold configured in `LsmConfig`.
+///
+/// # Usage
+///
+/// ```rust,ignore
+/// let lsm = Arc::new(LsmTree::open(config)?);
+/// start_compaction_worker(Arc::clone(&lsm), Duration::from_secs(30));
+/// ```
+pub fn start_compaction_worker(lsm: Arc<LsmTree>, interval: std::time::Duration) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.tick().await; // skip the immediate first tick
+        loop {
+            ticker.tick().await;
+            // Flush MemTable to disk if it has grown
+            let _ = lsm.flush();
+            // Compact L0 SSTables if threshold is exceeded
+            let count = lsm.sstables.read().map(|s| s.len()).unwrap_or(0);
+            if count >= lsm.config.l0_compaction_threshold {
+                match lsm.compact() {
+                    Ok(_)  => tracing::debug!("LSM background compaction complete ({count} → merged)"),
+                    Err(e) => tracing::warn!("LSM background compaction error: {e}"),
+                }
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

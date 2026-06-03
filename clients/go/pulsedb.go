@@ -1,9 +1,10 @@
 // Package pulsedb is the Go client for PulseDB.
-// It connects over TCP and speaks PulseQL via line-delimited JSON.
+// It connects over TCP (plain or TLS) and speaks PulseQL via line-delimited JSON.
 package pulsedb
 
 import (
 	"bufio"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -93,17 +94,35 @@ type Client struct {
 	mu      sync.Mutex
 }
 
-// Connect opens a TCP connection to the given address (e.g. "127.0.0.1:7878").
+// Connect opens a plain TCP connection to the given address (e.g. "127.0.0.1:7878").
 func Connect(addr string) (*Client, error) {
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("pulsedb: connect %s: %w", addr, err)
 	}
+	return newClient(conn), nil
+}
+
+// ConnectTLS opens a TLS-encrypted connection.
+// Set tlsConfig to nil to use system defaults (verifies server cert via system trust roots).
+// Use &tls.Config{InsecureSkipVerify: true} for self-signed certs in development only.
+func ConnectTLS(addr string, tlsConfig *tls.Config) (*Client, error) {
+	if tlsConfig == nil {
+		tlsConfig = &tls.Config{}
+	}
+	conn, err := tls.Dial("tcp", addr, tlsConfig)
+	if err != nil {
+		return nil, fmt.Errorf("pulsedb: tls connect %s: %w", addr, err)
+	}
+	return newClient(conn), nil
+}
+
+func newClient(conn net.Conn) *Client {
 	return &Client{
 		conn:    conn,
 		scanner: bufio.NewScanner(conn),
 		writer:  bufio.NewWriter(conn),
-	}, nil
+	}
 }
 
 // Auth authenticates the session.

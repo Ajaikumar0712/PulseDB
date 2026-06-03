@@ -99,59 +99,113 @@ pub struct Executor {
     /// Per-table disk eviction stores (disk mode only).
     pub disk_stores: Arc<Mutex<std::collections::HashMap<String, DiskRowStore>>>,
     /// The user authenticated on this connection (set by AUTH command).
-    /// Uses RwLock for interior mutability since execute_inner takes &self.
     pub session_user: std::sync::RwLock<Option<crate::auth::User>>,
     /// Current trigger recursion depth — prevents infinite trigger loops.
     trigger_depth: std::sync::atomic::AtomicU32,
+    /// WAL writer — used by CHECKPOINT to truncate after a successful snapshot.
+    pub wal: Option<Arc<crate::wal::WalWriter>>,
+    /// HNSW indexes keyed by "<table>.<column>" — live O(log n) vector search.
+    pub hnsw_indexes: Arc<Mutex<std::collections::HashMap<String, crate::engine::hnsw::HnswIndex>>>,
+    /// Maps HNSW node_index → row UUID, keyed by "<table>.<column>".
+    pub hnsw_id_map: Arc<Mutex<std::collections::HashMap<String, Vec<uuid::Uuid>>>>,
+}
+
+fn make_executor_fields(
+    db: Arc<Database>,
+    metrics: Arc<Metrics>,
+    data_dir: Option<Arc<std::path::PathBuf>>,
+) -> Executor {
+    Executor {
+        db,
+        config: ExecutorConfig::default(),
+        metrics,
+        data_dir,
+        watch_registry: None,
+        cluster_registry: None,
+        auth_manager: None,
+        runtime_config: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        shard_manager: Arc::new(crate::cluster::shard::ShardManager::new()),
+        trigger_store: Arc::new(TriggerStore::new()),
+        api_store: Arc::new(crate::api::ApiStore::new()),
+        disk_stores: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        session_user: std::sync::RwLock::new(None),
+        trigger_depth: std::sync::atomic::AtomicU32::new(0),
+        wal: None,
+        hnsw_indexes: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        hnsw_id_map: Arc::new(Mutex::new(std::collections::HashMap::new())),
+    }
 }
 
 impl Executor {
     pub fn new(db: Arc<Database>, metrics: Arc<Metrics>) -> Self {
-        Self {
-            db,
-            config: ExecutorConfig::default(),
-            metrics,
-            data_dir: None,
-            watch_registry: None,
-            cluster_registry: None,
-            auth_manager: None,
-            runtime_config: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            shard_manager: Arc::new(crate::cluster::shard::ShardManager::new()),
-            trigger_store: Arc::new(TriggerStore::new()),
-            api_store: Arc::new(crate::api::ApiStore::new()),
-            disk_stores: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            session_user: std::sync::RwLock::new(None),
-            trigger_depth: std::sync::atomic::AtomicU32::new(0),
-        }
+        make_executor_fields(db, metrics, None)
     }
 
-    /// Construct an executor that persists catalog + snapshots to `data_dir`.
     pub fn with_data_dir(
         db: Arc<Database>,
         metrics: Arc<Metrics>,
         data_dir: std::path::PathBuf,
     ) -> Self {
-        Self {
-            db,
-            config: ExecutorConfig::default(),
-            metrics,
-            data_dir: Some(Arc::new(data_dir)),
-            watch_registry: None,
-            cluster_registry: None,
-            auth_manager: None,
-            runtime_config: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            shard_manager: Arc::new(crate::cluster::shard::ShardManager::new()),
-            trigger_store: Arc::new(TriggerStore::new()),
-            api_store: Arc::new(crate::api::ApiStore::new()),
-            disk_stores: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            session_user: std::sync::RwLock::new(None),
-            trigger_depth: std::sync::atomic::AtomicU32::new(0),
-        }
+        make_executor_fields(db, metrics, Some(Arc::new(data_dir)))
     }
 
     /// Execute a single parsed statement.
     pub fn execute(&self, stmt: Stmt) -> Result<QueryResult, FlowError> {
+        // Pre-process: expand InSubquery expressions into concrete value lists.
+        let stmt = self.expand_subqueries(stmt)?;
         self.execute_inner(stmt)
+    }
+
+    /// Recursively replace `col IN (GET ...)` with `(col=v1 OR col=v2 OR ...)`.
+    fn expand_subqueries(&self, stmt: Stmt) -> Result<Stmt, FlowError> {
+        match stmt {
+            Stmt::Get { table, join, filter, group_by, order_by, limit, timeout_ms } => {
+                let filter = filter.map(|f| self.expand_expr_subquery(f)).transpose()?;
+                Ok(Stmt::Get { table, join, filter, group_by, order_by, limit, timeout_ms })
+            }
+            other => Ok(other),
+        }
+    }
+
+    fn expand_expr_subquery(&self, expr: crate::sql::ast::Expr) -> Result<crate::sql::ast::Expr, FlowError> {
+        use crate::sql::ast::{Expr, BinOp, Literal};
+        match expr {
+            Expr::InSubquery { column, subquery } => {
+                // Execute the subquery and collect the first column's values
+                let result = self.execute_inner(*subquery)?;
+                let values: Vec<Value> = match result {
+                    QueryResult::Rows { rows, .. } => rows.into_iter()
+                        .filter_map(|row| row.into_iter().next())
+                        .collect(),
+                    _ => vec![],
+                };
+                if values.is_empty() {
+                    return Ok(Expr::Literal(Literal::Bool(false)));
+                }
+                // Build (col = v1 OR col = v2 OR ...)
+                let mut acc = Expr::BinOp {
+                    op: BinOp::Eq,
+                    left: Box::new(Expr::Column(column.clone())),
+                    right: Box::new(Expr::Literal(value_to_literal(&values[0]))),
+                };
+                for v in &values[1..] {
+                    let next = Expr::BinOp {
+                        op: BinOp::Eq,
+                        left: Box::new(Expr::Column(column.clone())),
+                        right: Box::new(Expr::Literal(value_to_literal(v))),
+                    };
+                    acc = Expr::BinOp { op: BinOp::Or, left: Box::new(acc), right: Box::new(next) };
+                }
+                Ok(acc)
+            }
+            Expr::BinOp { op, left, right } => {
+                let left  = self.expand_expr_subquery(*left)?;
+                let right = self.expand_expr_subquery(*right)?;
+                Ok(Expr::BinOp { op, left: Box::new(left), right: Box::new(right) })
+            }
+            Expr::Not(inner) => Ok(Expr::Not(Box::new(self.expand_expr_subquery(*inner)?))),
+            other => Ok(other),
+        }
     }
 
     fn execute_inner(&self, stmt: Stmt) -> Result<QueryResult, FlowError> {
@@ -203,6 +257,7 @@ impl Executor {
                 Ok(QueryResult::Plan { description: desc })
             }
             Stmt::Checkpoint => self.exec_checkpoint(t0),
+            Stmt::PurgeHistory { before } => self.exec_purge_history(before, t0),
             // WATCH / UNWATCH are handled at the server layer for async streaming;
             // reaching here means a test or non-streaming caller — treat as no-op.
             Stmt::Watch { .. } | Stmt::Unwatch { .. } => {
@@ -247,8 +302,8 @@ impl Executor {
             Stmt::ShowTriggers               => self.exec_show_triggers(t0),
 
             // ── Graph ──────────────────────────────────────────────────────────────
-            Stmt::GraphMatch { src_alias, src_table, edge_alias, edge_table, dst_alias, dst_table, filter, limit } =>
-                self.exec_graph_match(src_alias, src_table, edge_alias, edge_table, dst_alias, dst_table, filter, limit, t0),
+            Stmt::GraphMatch { src_alias, src_table, edge_alias, edge_table, dst_alias, dst_table, filter, limit, hops } =>
+                self.exec_graph_match(src_alias, src_table, edge_alias, edge_table, dst_alias, dst_table, filter, limit, hops, t0),
 
             // ── REST API ───────────────────────────────────────────────────────────
             Stmt::ApiGenerate { table }      => self.exec_api_generate(table, t0),
@@ -270,6 +325,36 @@ impl Executor {
         timeout_ms: Option<u64>,
         t0: Instant,
     ) -> Result<QueryResult, FlowError> {
+        // ── 0. Build combined filter: user WHERE + row-level security ───────
+        // If the session user has a row-level filter for SELECT on this table,
+        // AND it with the query's own WHERE clause.
+        let rls_filter: Option<crate::sql::ast::Expr> = self
+            .session_user.read().ok()
+            .and_then(|g| g.as_ref()?.row_filter(&crate::auth::Op::Select, table_name))
+            .and_then(|expr_str| {
+                crate::sql::parser::Parser::parse_str(&expr_str)
+                    .ok()?
+                    .into_iter()
+                    .next()
+                    .and_then(|stmt| {
+                        if let crate::sql::ast::Stmt::Get { filter, .. } = stmt {
+                            filter
+                        } else { None }
+                    })
+            });
+
+        // Combine user WHERE with RLS filter using AND
+        let filter = match (filter, rls_filter) {
+            (Some(u), Some(r)) => Some(crate::sql::ast::Expr::BinOp {
+                op: crate::sql::ast::BinOp::And,
+                left: Box::new(u),
+                right: Box::new(r),
+            }),
+            (Some(u), None)    => Some(u),
+            (None,    Some(r)) => Some(r),
+            (None,    None)    => None,
+        };
+
         // ── 1. Ask the planner for the cheapest scan strategy ───────────────
         let strategy = Planner::new(Arc::clone(&self.db))
             .choose_scan(table_name, filter.as_ref());
@@ -799,16 +884,170 @@ impl Executor {
     // ── CHECKPOINT ────────────────────────────────────────────
 
     fn exec_checkpoint(&self, t0: Instant) -> Result<QueryResult, FlowError> {
-        match &self.data_dir {
-            None => Ok(QueryResult::ok("CHECKPOINT skipped (no data dir configured)", t0.elapsed())),
-            Some(dir) => {
-                let rows = persist::checkpoint(&self.db, dir)?;
-                Ok(QueryResult::ok(
-                    format!("CHECKPOINT complete: {rows} rows written"),
-                    t0.elapsed(),
-                ))
+        let dir = match &self.data_dir {
+            None => {
+                return Ok(QueryResult::ok("CHECKPOINT skipped (no --data-dir configured)", t0.elapsed()));
+            }
+            Some(d) => d.as_ref().clone(),
+        };
+
+        // 1. Write row snapshots + catalog
+        let rows = persist::checkpoint(&self.db, &dir)?;
+
+        // 2. Save HNSW indexes so they survive restarts
+        self.save_hnsw_indexes(&dir);
+
+        // 3. Truncate WAL — snapshot now contains all committed state
+        if let Some(ref wal) = self.wal {
+            if let Err(e) = wal.truncate() {
+                tracing::warn!("CHECKPOINT: WAL truncation failed (non-fatal): {e}");
             }
         }
+
+        Ok(QueryResult::ok(
+            format!("CHECKPOINT complete: {rows} rows written, WAL truncated"),
+            t0.elapsed(),
+        ))
+    }
+
+    /// Serialize all HNSW indexes to `<data-dir>/<table>.<col>.hnsw.json`.
+    pub fn save_hnsw_indexes(&self, data_dir: &std::path::Path) {
+        let idx_map = self.hnsw_indexes.lock().unwrap_or_else(|e| e.into_inner());
+        let id_map  = self.hnsw_id_map.lock().unwrap_or_else(|e| e.into_inner());
+        for (key, index) in idx_map.iter() {
+            let ids = id_map.get(key).cloned().unwrap_or_default();
+            let data = serde_json::json!({
+                "key": key,
+                "ids": ids,
+                "nodes": index.to_json_nodes(),
+            });
+            let safe_key = key.replace('.', "_");
+            let path = data_dir.join(format!("{safe_key}.hnsw.json"));
+            if let Ok(text) = serde_json::to_string(&data) {
+                let _ = std::fs::write(&path, text);
+            }
+        }
+    }
+
+    /// Load HNSW indexes from `<data-dir>/*.hnsw.json` files after recovery.
+    pub fn load_hnsw_indexes(&self, data_dir: &std::path::Path) {
+        let Ok(entries) = std::fs::read_dir(data_dir) else { return };
+        let mut idx_map = self.hnsw_indexes.lock().unwrap_or_else(|e| e.into_inner());
+        let mut id_map  = self.hnsw_id_map.lock().unwrap_or_else(|e| e.into_inner());
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if !stem.ends_with(".hnsw") { continue; }
+
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            let Ok(data) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+
+            let key = data["key"].as_str().unwrap_or("").to_string();
+            if key.is_empty() { continue; }
+
+            // Restore the id_map
+            let ids: Vec<uuid::Uuid> = data["ids"]
+                .as_array()
+                .unwrap_or(&vec![])
+                .iter()
+                .filter_map(|v| v.as_str()?.parse().ok())
+                .collect();
+            id_map.insert(key.clone(), ids.clone());
+
+            // Rebuild the HNSW index from stored nodes
+            let nodes = data["nodes"].as_array().unwrap_or(&vec![]).clone();
+            let mut index = crate::engine::hnsw::HnswIndex::default();
+            for node in &nodes {
+                if let Some(vec_arr) = node["vector"].as_array() {
+                    let vec: Vec<f32> = vec_arr.iter()
+                        .filter_map(|v| v.as_f64().map(|f| f as f32))
+                        .collect();
+                    index.insert(vec);
+                }
+            }
+            idx_map.insert(key, index);
+            tracing::info!("HNSW index loaded: {} ({} vectors)", path.display(), nodes.len());
+        }
+    }
+
+    /// PURGE HISTORY BEFORE "<timestamp>"
+    /// - Removes soft-deleted rows older than the cutoff from all tables (GDPR erasure)
+    /// - Rewrites the WAL file, dropping records older than the cutoff
+    /// - Admin only
+    fn exec_purge_history(&self, before: String, t0: Instant) -> Result<QueryResult, FlowError> {
+        if !self.session_is_admin() {
+            return Err(FlowError::auth("only admin users can run PURGE HISTORY"));
+        }
+
+        let cutoff = chrono::DateTime::parse_from_rfc3339(&before)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .or_else(|_| {
+                chrono::NaiveDate::parse_from_str(&before, "%Y-%m-%d")
+                    .map(|nd| nd.and_hms_opt(0, 0, 0).unwrap().and_utc())
+                    .map_err(|e| e)
+            })
+            .map_err(|_| FlowError::Parse(format!(
+                "invalid timestamp `{before}` — use RFC 3339 (e.g. \"2024-06-01T00:00:00Z\") or YYYY-MM-DD"
+            )))?;
+
+        // 1. Remove soft-deleted rows older than cutoff from all tables
+        let mut purged_rows = 0usize;
+        {
+            let guard = self.db.tables.read().unwrap();
+            for tbl_lock in guard.values() {
+                let mut tbl = tbl_lock.write().unwrap();
+                let before_len = tbl.rows.len();
+                tbl.rows.retain(|_, row| {
+                    // Keep live rows and rows last updated AFTER the cutoff
+                    if !row.deleted { return true; }
+                    row.updated_at >= cutoff
+                });
+                purged_rows += before_len - tbl.rows.len();
+            }
+        }
+
+        // 2. Rewrite WAL if we have a writer: drop records older than cutoff
+        let mut purged_wal = 0usize;
+        if let Some(ref wal) = self.wal {
+            match crate::wal::read_wal(&wal.path) {
+                Ok(records) => {
+                    let original_len = records.len();
+                    let kept: Vec<crate::wal::WalRecord> = records
+                        .into_iter()
+                        .filter(|r| {
+                            // Keep structural records (Begin/Commit/Rollback) and
+                            // Statement records newer than the cutoff
+                            match r {
+                                crate::wal::WalRecord::Statement { timestamp, .. } => {
+                                    *timestamp >= cutoff
+                                }
+                                _ => true,
+                            }
+                        })
+                        .collect();
+                    purged_wal = original_len - kept.len();
+
+                    // Truncate and rewrite
+                    if let Err(e) = wal.truncate() {
+                        tracing::warn!("PURGE HISTORY: WAL truncate failed: {e}");
+                    } else {
+                        for rec in &kept {
+                            let _ = wal.append(rec);
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!("PURGE HISTORY: could not read WAL: {e}"),
+            }
+        }
+
+        Ok(QueryResult::ok(
+            format!(
+                "PURGE HISTORY complete: {purged_rows} rows removed, {purged_wal} WAL records purged (before {before})"
+            ),
+            t0.elapsed(),
+        ))
     }
 
     /// Persist the current catalog to disk (no-op when data_dir is None).
@@ -1151,8 +1390,6 @@ impl Executor {
         limit: Option<u64>,
         t0: Instant,
     ) -> Result<QueryResult, FlowError> {
-        // Time-travel bypasses current row visibility — apply the same SELECT
-        // permission check as a regular GET to prevent historical data leaks.
         self.check_select_permission(&table)?;
 
         use chrono::DateTime;
@@ -1160,14 +1397,87 @@ impl Executor {
         let cutoff = DateTime::parse_from_rfc3339(&timestamp)
             .map(|dt| dt.with_timezone(&chrono::Utc))
             .or_else(|_| {
-                // Try YYYY-MM-DD format
                 chrono::NaiveDate::parse_from_str(&timestamp, "%Y-%m-%d")
-                    .map(|nd| nd.and_hms_opt(0, 0, 0).unwrap())
-                    .map(|ndt| ndt.and_utc())
+                    .map(|nd| nd.and_hms_opt(0, 0, 0).unwrap().and_utc())
                     .map_err(|e| e)
             })
             .map_err(|_| FlowError::Parse(format!("invalid timestamp: `{}`", timestamp)))?;
 
+        // Strategy 1 — WAL replay: reconstruct exact state at `cutoff` by
+        // replaying committed WAL statements whose timestamp ≤ cutoff.
+        // This is the authoritative approach when a WAL file is available.
+        if let Some(ref wal) = self.wal {
+            if let Ok(records) = crate::wal::read_wal(&wal.path) {
+                // Filter to statements committed before the cutoff
+                let historical_stmts: Vec<serde_json::Value> = {
+                    use std::collections::{HashMap, HashSet};
+                    let mut buf: HashMap<u64, Vec<serde_json::Value>> = HashMap::new();
+                    let mut commit_times: HashMap<u64, chrono::DateTime<chrono::Utc>> = HashMap::new();
+                    let mut order: Vec<u64> = Vec::new();
+
+                    for rec in records {
+                        match &rec {
+                            crate::wal::WalRecord::Statement { tx_id, stmt_json, timestamp } => {
+                                if *timestamp <= cutoff {
+                                    buf.entry(*tx_id).or_default().push(stmt_json.clone());
+                                }
+                            }
+                            crate::wal::WalRecord::Commit { tx_id, timestamp } => {
+                                if *timestamp <= cutoff {
+                                    commit_times.insert(*tx_id, *timestamp);
+                                    order.push(*tx_id);
+                                }
+                            }
+                            crate::wal::WalRecord::Rollback { tx_id } => {
+                                buf.remove(tx_id);
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    order.into_iter()
+                        .filter(|id| commit_times.contains_key(id))
+                        .filter_map(|id| buf.remove(&id))
+                        .flatten()
+                        .collect()
+                };
+
+                if !historical_stmts.is_empty() {
+                    // Build a fresh in-memory database and replay into it
+                    let hist_db = Arc::new(crate::storage::table::Database::new());
+                    let hist_exec = Executor::new(Arc::clone(&hist_db), Arc::clone(&self.metrics));
+                    for stmt_json in historical_stmts {
+                        if let Ok(stmt) = serde_json::from_value::<crate::sql::ast::Stmt>(stmt_json) {
+                            let _ = hist_exec.execute(stmt);
+                        }
+                    }
+                    // Now query the historical db
+                    let hist_tbl = hist_db.get_table(&table)
+                        .unwrap_or_else(|_| self.db.get_table(&table).unwrap());
+                    let guard = hist_tbl.read().unwrap();
+                    let mut rows: Vec<&crate::types::Row> = guard.rows.values()
+                        .filter(|r| !r.deleted).collect();
+                    if let Some(f) = &filter {
+                        rows.retain(|r| Evaluator::matches_filter(f, r).unwrap_or(false));
+                    }
+                    if let Some(ob) = &order_by {
+                        rows.sort_by(|a, b| {
+                            let ord = a.get_or_null(&ob.column.column)
+                                .partial_cmp_val(&b.get_or_null(&ob.column.column))
+                                .unwrap_or(std::cmp::Ordering::Equal);
+                            if ob.ascending { ord } else { ord.reverse() }
+                        });
+                    }
+                    if let Some(lim) = limit { rows.truncate(lim as usize); }
+                    let columns: Vec<String> = guard.schema.columns.iter().map(|c| c.name.clone()).collect();
+                    let result_rows = rows.iter().map(|r| columns.iter().map(|c| r.get_or_null(c)).collect()).collect();
+                    return Ok(QueryResult::Rows { columns, rows: result_rows, elapsed_ms: t0.elapsed().as_millis() as u64 });
+                }
+            }
+        }
+
+        // Strategy 2 — fallback: filter live rows by updated_at ≤ cutoff.
+        // Used when no WAL is available or WAL has been truncated.
         let tbl = self.db.get_table(&table)?;
         let guard = tbl.read().unwrap();
 
@@ -1356,9 +1666,9 @@ impl Executor {
         dst_table: String,
         filter: Option<crate::sql::ast::Expr>,
         limit: Option<u64>,
+        hops: Option<(usize, usize)>,
         t0: Instant,
     ) -> Result<QueryResult, FlowError> {
-        // Enforce mandatory limit — unbounded graph traversal can exhaust memory.
         let requested = limit.unwrap_or(Self::DEFAULT_GRAPH_LIMIT as u64) as usize;
         if requested > Self::MAX_GRAPH_LIMIT {
             return Err(FlowError::Parse(format!(
@@ -1368,7 +1678,6 @@ impl Executor {
         }
         let k = requested;
 
-        // Check SELECT permission on all three tables referenced in the pattern.
         if let Some(am) = &self.auth_manager {
             let user_guard = self.session_user.read().unwrap_or_else(|e| e.into_inner());
             if let Some(user) = user_guard.as_ref() {
@@ -1384,14 +1693,26 @@ impl Executor {
             }
         }
 
-        let results = crate::graph::GraphEngine::match_query(
-            &self.db,
-            &src_alias, &src_table,
-            &edge_alias, &edge_table,
-            &dst_alias, &dst_table,
-            filter.as_ref(),
-            k,
-        )?;
+        // Dispatch: multi-hop BFS when a hop range is specified.
+        let results = if let Some((min_h, max_h)) = hops {
+            crate::graph::GraphEngine::match_multihop(
+                &self.db,
+                &src_table,
+                &edge_table,
+                &src_alias,
+                filter.as_ref(),
+                min_h, max_h, k,
+            )?
+        } else {
+            crate::graph::GraphEngine::match_query(
+                &self.db,
+                &src_alias, &src_table,
+                &edge_alias, &edge_table,
+                &dst_alias, &dst_table,
+                filter.as_ref(),
+                k,
+            )?
+        };
 
         if results.is_empty() {
             return Ok(QueryResult::Rows {
@@ -1499,6 +1820,19 @@ fn val_to_f64(v: &Value) -> f64 {
 }
 
 // ── Cosine similarity ─────────────────────────────────────────────────────
+
+/// Convert a runtime Value into an AST Literal for subquery IN-list expansion.
+fn value_to_literal(v: &Value) -> crate::sql::ast::Literal {
+    use crate::sql::ast::Literal;
+    match v {
+        Value::Int(i)   => Literal::Int(*i),
+        Value::Float(f) => Literal::Float(*f),
+        Value::Bool(b)  => Literal::Bool(*b),
+        Value::Text(s)  => Literal::Text(s.clone()),
+        Value::Null     => Literal::Null,
+        _               => Literal::Null,
+    }
+}
 
 /// Computes the cosine similarity between two equal-length f32 vectors.
 /// Returns 0.0 for zero-length or mismatched vectors.

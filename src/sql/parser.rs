@@ -55,6 +55,7 @@ impl Parser {
             Token::Kill     => self.parse_kill(),
             Token::Explain  => self.parse_explain(),
             Token::Checkpoint => { self.advance(); Ok(Stmt::Checkpoint) }
+            Token::Purge    => self.parse_purge_history(),
             Token::Watch    => self.parse_watch(),
             Token::Unwatch  => self.parse_unwatch(),
             Token::Similar  => self.parse_similar(),
@@ -434,6 +435,17 @@ impl Parser {
         Ok(Stmt::Explain(Box::new(inner)))
     }
 
+    // ── PURGE HISTORY ──────────────────────────────────────────
+
+    /// PURGE HISTORY BEFORE "<timestamp>"
+    fn parse_purge_history(&mut self) -> Result<Stmt, FlowError> {
+        self.expect(Token::Purge)?;
+        self.expect(Token::History)?;
+        self.expect(Token::Before)?;
+        let before = self.expect_string("timestamp string after BEFORE")?;
+        Ok(Stmt::PurgeHistory { before })
+    }
+
     // ── WATCH ──────────────────────────────────────────────────
 
     fn parse_watch(&mut self) -> Result<Stmt, FlowError> {
@@ -719,6 +731,16 @@ impl Parser {
         let edge_alias = self.expect_ident("edge alias")?;
         self.expect(Token::Colon)?;
         let edge_table = self.expect_ident("edge table")?;
+        // Optional hop range: *min..max  e.g.  [rel:follows*1..3]
+        let hops: Option<(usize, usize)> = if self.eat(Token::Star) {
+            let min = self.expect_int("min hops")? as usize;
+            self.expect(Token::Dot)?;
+            self.expect(Token::Dot)?;
+            let max = self.expect_int("max hops")? as usize;
+            Some((min, max))
+        } else {
+            None
+        };
         self.expect(Token::RBracket)?;
         self.expect(Token::Minus)?;
         self.expect(Token::Gt)?;
@@ -741,7 +763,7 @@ impl Parser {
             src_alias, src_table,
             edge_alias, edge_table,
             dst_alias, dst_table,
-            filter, limit,
+            filter, limit, hops,
         })
     }
 
@@ -854,6 +876,17 @@ impl Parser {
             self.advance();
             let right = self.parse_additive()?;
             Ok(Expr::BinOp { op, left: Box::new(left), right: Box::new(right) })
+        } else if matches!(self.peek(), Token::In) {
+            // col IN (GET table [WHERE ...])
+            self.advance(); // consume IN
+            self.expect(Token::LParen)?;
+            let sub_stmt = self.parse_stmt()?;
+            self.expect(Token::RParen)?;
+            if let Expr::Column(col) = left {
+                Ok(Expr::InSubquery { column: col, subquery: Box::new(sub_stmt) })
+            } else {
+                Err(FlowError::parse("left side of IN must be a column name"))
+            }
         } else {
             Ok(left)
         }

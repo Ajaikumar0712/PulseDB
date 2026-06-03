@@ -102,6 +102,19 @@ impl HnswIndex {
     /// Number of indexed vectors.
     pub fn len(&self) -> usize { self.nodes.len() }
 
+    /// Serialize the node vectors to a JSON array for persistence.
+    /// Each element is `{"vector": [f32, ...], "level": usize}`.
+    pub fn to_json_nodes(&self) -> serde_json::Value {
+        serde_json::Value::Array(
+            self.nodes.iter().map(|n| {
+                serde_json::json!({
+                    "vector": n.vector,
+                    "level":  n.level,
+                })
+            }).collect()
+        )
+    }
+
     // ── Insert ───────────────────────────────────────────────────────────
 
     /// Add a vector to the index, tagging it with `payload` (e.g. a row UUID).

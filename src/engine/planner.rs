@@ -159,6 +159,7 @@ impl Planner {
             Stmt::KillQuery { id }    => PlanNode::KillQuery { id: *id },
             Stmt::Explain(_)          => PlanNode::Transaction { command: "EXPLAIN" },
             Stmt::Checkpoint          => PlanNode::Transaction { command: "CHECKPOINT" },
+            Stmt::PurgeHistory { .. } => PlanNode::Transaction { command: "PURGE HISTORY" },
             Stmt::Watch { table: _, .. } => PlanNode::Transaction { command: "WATCH" },
             Stmt::Unwatch { .. }      => PlanNode::Transaction { command: "UNWATCH" },
             Stmt::Similar { table, limit, .. } => PlanNode::FuzzySearch {

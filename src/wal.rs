@@ -63,6 +63,12 @@ pub enum WalRecord {
     CreateTable { tx_id: u64, table: String },
     /// DDL: a table was dropped.
     DropTable { tx_id: u64, table: String },
+    /// Statement-level record — full serialized Stmt JSON for crash replay.
+    Statement {
+        tx_id: u64,
+        stmt_json: serde_json::Value,
+        timestamp: DateTime<Utc>,
+    },
 }
 
 impl WalRecord {
@@ -76,6 +82,7 @@ impl WalRecord {
             WalRecord::Rollback { tx_id } => *tx_id,
             WalRecord::CreateTable { tx_id, .. } => *tx_id,
             WalRecord::DropTable { tx_id, .. } => *tx_id,
+            WalRecord::Statement { tx_id, .. } => *tx_id,
         }
     }
 }
@@ -125,6 +132,21 @@ impl WalWriter {
         })
     }
 
+    /// Truncate the WAL to zero length after a successful CHECKPOINT.
+    /// Safe because the snapshot now captures all committed state — the WAL
+    /// tail is no longer needed for crash recovery.
+    pub fn truncate(&self) -> Result<(), FlowError> {
+        let mut w = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        w.flush().map_err(|e| FlowError::Wal(format!("flush before truncate: {e}")))?;
+        w.get_ref().set_len(0)
+            .map_err(|e| FlowError::Wal(format!("WAL truncate failed: {e}")))?;
+        use std::io::Seek;
+        w.seek(std::io::SeekFrom::Start(0))
+            .map_err(|e| FlowError::Wal(format!("WAL seek after truncate: {e}")))?;
+        info!("WAL truncated after checkpoint — crash recovery now starts from snapshot");
+        Ok(())
+    }
+
     /// Append a single record to the WAL.
     /// If an encryption key is configured, the record is AES-256-GCM encrypted:
     ///   line format: `enc:<hex(nonce || ciphertext)>`
@@ -166,7 +188,55 @@ fn record_op_name(r: &WalRecord) -> &'static str {
         WalRecord::Rollback { .. }    => "ROLLBACK",
         WalRecord::CreateTable { .. } => "CREATE_TABLE",
         WalRecord::DropTable { .. }   => "DROP_TABLE",
+        WalRecord::Statement { .. }   => "STATEMENT",
     }
+}
+
+// ── Committed statement extractor ────────────────────────────────────────
+
+/// Extract all committed Stmt records from WAL records in deterministic tx order.
+/// Only mutation statements from committed transactions are returned.
+pub fn committed_statements(records: Vec<WalRecord>) -> Vec<serde_json::Value> {
+    use std::collections::{HashMap, HashSet};
+
+    let mut buffered: HashMap<u64, Vec<serde_json::Value>> = HashMap::new();
+    let mut commit_order: Vec<u64> = Vec::new();
+    let mut committed: HashSet<u64> = HashSet::new();
+
+    for rec in records {
+        match rec {
+            WalRecord::Begin { tx_id } => {
+                buffered.entry(tx_id).or_default();
+            }
+            WalRecord::Statement { tx_id, stmt_json, .. } => {
+                buffered.entry(tx_id).or_default().push(stmt_json);
+            }
+            WalRecord::CreateTable { tx_id, ref table } => {
+                let json = serde_json::json!({ "MakeTable": { "name": table, "columns": [] } });
+                buffered.entry(tx_id).or_default().push(json);
+            }
+            WalRecord::DropTable { tx_id, ref table } => {
+                let json = serde_json::json!({ "DropTable": { "name": table } });
+                buffered.entry(tx_id).or_default().push(json);
+            }
+            WalRecord::Commit { tx_id, .. } => {
+                committed.insert(tx_id);
+                commit_order.push(tx_id);
+            }
+            WalRecord::Rollback { tx_id } => {
+                buffered.remove(&tx_id);
+            }
+            _ => {}
+        }
+    }
+
+    // Replay in commit order (deterministic, not HashMap order)
+    commit_order
+        .into_iter()
+        .filter(|id| committed.contains(id))
+        .filter_map(|tx_id| buffered.remove(&tx_id))
+        .flatten()
+        .collect()
 }
 
 // ── Wal reader / recovery ─────────────────────────────────────────────────

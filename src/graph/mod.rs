@@ -168,6 +168,122 @@ impl GraphEngine {
 
         Ok(results)
     }
+
+    /// Multi-hop BFS traversal.
+    ///
+    /// Traverses up to `max_hops` edge-table hops from the source nodes.
+    /// All three tables are the same node table; `edge_table` is traversed
+    /// repeatedly.
+    ///
+    /// Returns rows of the form `{ depth, node.<col>, ... }` for each
+    /// reachable node, in BFS order.
+    ///
+    /// ```sql
+    /// -- Equivalent of: traverse 'follows' from Alice up to 3 hops
+    /// GRAPH MATCH (a:people) -[rel:follows*1..3]-> (b:people)
+    ///     WHERE a.name = "Alice" LIMIT 100
+    /// ```
+    pub fn match_multihop(
+        db: &Arc<Database>,
+        node_table: &str,
+        edge_table: &str,
+        node_alias: &str,
+        filter: Option<&Expr>,
+        min_hops: usize,
+        max_hops: usize,
+        limit: usize,
+    ) -> Result<Vec<HashMap<String, Value>>, FlowError> {
+        use std::collections::{HashSet, VecDeque};
+
+        let node_tbl = db.get_table(node_table)?;
+        let node_guard = node_tbl.read().map_err(|_| FlowError::Io("lock".into()))?;
+        let node_pk = node_guard.schema.primary_key().unwrap_or("id").to_string();
+
+        // Index all node rows by primary key
+        let mut node_index: HashMap<String, HashMap<String, Value>> = HashMap::new();
+        for row in node_guard.rows.values().filter(|r| !r.deleted) {
+            if let Some(pk) = row.fields.get(&node_pk) {
+                node_index.insert(format!("{:?}", pk), row.fields.clone());
+            }
+        }
+        drop(node_guard);
+
+        let edge_tbl = db.get_table(edge_table)?;
+        let edge_guard = edge_tbl.read().map_err(|_| FlowError::Io("lock".into()))?;
+
+        // Build adjacency list: from_key → [to_key, ...]
+        let mut adj: HashMap<String, Vec<String>> = HashMap::new();
+        for edge_row in edge_guard.rows.values().filter(|r| !r.deleted) {
+            if let (Some(from), Some(to)) = (
+                edge_row.fields.get("from_id"),
+                edge_row.fields.get("to_id"),
+            ) {
+                adj.entry(format!("{:?}", from))
+                    .or_default()
+                    .push(format!("{:?}", to));
+            }
+        }
+        drop(edge_guard);
+
+        // Collect start nodes (matching the WHERE filter at hop 0)
+        let start_keys: Vec<String> = node_index
+            .iter()
+            .filter(|(_, fields)| {
+                if let Some(f) = filter {
+                    let row = crate::types::Row::new(
+                        fields.iter()
+                            .map(|(k, v)| (format!("{node_alias}.{k}"), v.clone()))
+                            .collect(),
+                    );
+                    Evaluator::eval(f, &row).map(|v| v.is_truthy()).unwrap_or(false)
+                } else {
+                    true
+                }
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        // BFS
+        let mut results: Vec<HashMap<String, Value>> = Vec::new();
+        let mut visited: HashSet<String> = HashSet::new();
+        // Queue: (node_key, depth)
+        let mut queue: VecDeque<(String, usize)> = start_keys
+            .into_iter()
+            .map(|k| (k, 0))
+            .collect();
+
+        while let Some((key, depth)) = queue.pop_front() {
+            if depth > max_hops { continue; }
+            if visited.contains(&key) { continue; }
+            visited.insert(key.clone());
+
+            if depth >= min_hops {
+                if let Some(fields) = node_index.get(&key) {
+                    let mut row: HashMap<String, Value> = fields
+                        .iter()
+                        .map(|(k, v)| (format!("{node_alias}.{k}"), v.clone()))
+                        .collect();
+                    row.insert("depth".into(), Value::Int(depth as i64));
+                    results.push(row);
+                    if results.len() >= limit {
+                        break;
+                    }
+                }
+            }
+
+            if depth < max_hops {
+                if let Some(neighbors) = adj.get(&key) {
+                    for neighbor in neighbors {
+                        if !visited.contains(neighbor) {
+                            queue.push_back((neighbor.clone(), depth + 1));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(results)
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────

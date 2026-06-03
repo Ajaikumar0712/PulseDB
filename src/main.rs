@@ -208,6 +208,45 @@ pub(crate) fn run_server(
         std::process::exit(1);
     }
 
+    // Replay committed WAL statements written since the last checkpoint.
+    // Also loads saved HNSW indexes from <data-dir>/*.hnsw.json.
+    {
+        use crate::wal::{read_wal, committed_statements};
+        use crate::engine::executor::Executor as ReplayExec;
+
+        match read_wal(&wal_path) {
+            Ok(records) if !records.is_empty() => {
+                let stmts_json = committed_statements(records);
+                if !stmts_json.is_empty() {
+                    info!("WAL replay: {} committed statements to apply", stmts_json.len());
+                    let replay_exec = ReplayExec::new(Arc::clone(&db), Arc::clone(&metrics));
+                    let mut ok = 0usize;
+                    let mut err = 0usize;
+                    for stmt_json in stmts_json {
+                        match serde_json::from_value::<crate::sql::ast::Stmt>(stmt_json) {
+                            Ok(stmt) => {
+                                if let Err(e) = replay_exec.execute(stmt) {
+                                    tracing::warn!("WAL replay error (skipping): {e}");
+                                    err += 1;
+                                } else { ok += 1; }
+                            }
+                            Err(e) => { tracing::warn!("WAL replay stmt parse: {e}"); err += 1; }
+                        }
+                    }
+                    info!("WAL replay complete: {ok} applied, {err} skipped");
+                    // Restore HNSW indexes that were saved at the last CHECKPOINT
+                    replay_exec.load_hnsw_indexes(&data_dir);
+                }
+            }
+            Ok(_) => {
+                // No WAL records — still try to load saved HNSW indexes
+                let tmp = ReplayExec::new(Arc::clone(&db), Arc::clone(&metrics));
+                tmp.load_hnsw_indexes(&data_dir);
+            }
+            Err(e) => tracing::warn!("WAL replay skipped (read error): {e}"),
+        }
+    }
+
     // Build auth manager — secure by default, open only with --no-auth.
     // Password precedence: --admin-password flag → PULSEDB_ADMIN_PASSWORD env → generated.
     let admin_password = admin_password
@@ -233,6 +272,7 @@ pub(crate) fn run_server(
     let watch_registry   = Arc::new(WatchRegistry::new());
     let cluster_registry = Arc::new(ClusterRegistry::new());
 
+    let lsm_data_dir = data_dir.clone(); // saved before data_dir is moved into the server
     let mut srv = Server::new(db, wal, metrics, addr)
         .with_data_dir(data_dir)
         .with_watch_registry(Arc::clone(&watch_registry))
@@ -287,6 +327,22 @@ pub(crate) fn run_server(
                     }
                 }
             });
+
+            // Background LSM compaction: runs every 30 s, compacts when
+            // L0 SSTable count exceeds the configured threshold.
+            {
+                use crate::storage::lsm::{LsmTree, LsmConfig, start_compaction_worker};
+                let lsm_dir = lsm_data_dir.join("lsm");
+                if let Ok(lsm) = LsmTree::open(LsmConfig {
+                    data_dir: lsm_dir,
+                    ..LsmConfig::default()
+                }) {
+                    start_compaction_worker(
+                        std::sync::Arc::new(lsm),
+                        std::time::Duration::from_secs(30),
+                    );
+                }
+            }
 
             if let Err(e) = srv.serve().await {
                 eprintln!("server error: {e}");

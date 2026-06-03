@@ -117,6 +117,13 @@ pub struct RaftState {
     pub voted_for: Option<NodeId>,
     pub log: Vec<LogEntry>, // index 0 is a sentinel (term=0, index=0)
 
+    // ── Snapshot state (log compaction) ──────────────────────────────────
+    /// The highest log index covered by the last snapshot.
+    /// Entries at or below this index have been compacted away.
+    pub snapshot_index: u64,
+    /// The Raft term of the entry at `snapshot_index`.
+    pub snapshot_term: u64,
+
     // ── Volatile ─────────────────────────────────────────────────────────
     pub commit_index: u64,
     pub last_applied: u64,
@@ -144,6 +151,8 @@ impl RaftState {
             current_term: 0,
             voted_for: None,
             log: vec![LogEntry { term: 0, index: 0, data: Vec::new() }], // sentinel
+            snapshot_index: 0,
+            snapshot_term: 0,
             commit_index: 0,
             last_applied: 0,
             role: Role::Follower,
@@ -314,6 +323,58 @@ impl RaftState {
             }
         }
     }
+
+    // ── Log compaction (snapshotting) ─────────────────────────────────────
+
+    /// Compact log entries up to (but not including) `up_to_index`.
+    /// Called after the application has persisted a snapshot at that index.
+    ///
+    /// All entries with index ≤ `up_to_index` are removed from memory.
+    /// `snapshot_index` and `snapshot_term` are updated to reflect the new base.
+    ///
+    /// The sentinel at position 0 is replaced with a new sentinel whose
+    /// term = the term of the last compacted entry (needed for log consistency).
+    pub fn compact_log(&mut self, up_to_index: u64) {
+        if up_to_index <= self.snapshot_index {
+            return; // nothing to compact
+        }
+        let up_to = up_to_index.min(self.commit_index); // never compact past commit
+        if up_to == 0 { return; }
+
+        // Find the log position of `up_to`
+        let base = self.snapshot_index;
+        let pos = (up_to - base) as usize; // position in self.log
+        if pos >= self.log.len() { return; }
+
+        let snap_term = self.log[pos].term;
+        // Drain entries 0..=pos, keep pos+1 onward
+        let remaining: Vec<LogEntry> = self.log.split_off(pos + 1);
+        // Replace with a new sentinel representing the snapshot boundary
+        self.log = std::iter::once(LogEntry {
+            term:  snap_term,
+            index: up_to,
+            data:  Vec::new(),
+        }).chain(remaining).collect();
+
+        self.snapshot_index = up_to;
+        self.snapshot_term  = snap_term;
+
+        tracing::info!(
+            "Raft[{:?}] log compacted to index {up_to} — {} entries remaining",
+            self.id, self.log.len() - 1
+        );
+    }
+
+    /// Compact automatically when the log exceeds `max_entries` uncommitted entries.
+    /// Returns `true` if compaction was performed.
+    pub fn maybe_compact(&mut self, max_entries: usize) -> bool {
+        let uncommitted = self.log.len().saturating_sub(1); // subtract sentinel
+        if uncommitted > max_entries && self.commit_index > self.snapshot_index {
+            self.compact_log(self.commit_index);
+            return true;
+        }
+        false
+    }
 }
 
 // ── RaftNode ─────────────────────────────────────────────────────────────
@@ -392,6 +453,8 @@ impl RaftNode {
             s.match_index.insert(from, reply.match_index);
             s.next_index.insert(from, reply.match_index + 1);
             s.advance_commit_index();
+            // Compact the log when it exceeds 10,000 entries past the commit point
+            s.maybe_compact(10_000);
         } else {
             // Decrement next_index to try with an earlier entry.
             let ni = s.next_index.get(&from).copied().unwrap_or(1);

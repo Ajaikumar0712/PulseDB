@@ -41,6 +41,13 @@ pub enum Expr {
 
     // Fuzzy match: `col ~ "pattern"`
     Fuzzy { column: ColumnRef, pattern: String },
+
+    // Subquery: col IN (GET table WHERE ...)
+    // The inner statement is stored as a serialized Stmt for lazy evaluation.
+    InSubquery {
+        column: ColumnRef,
+        subquery: Box<Stmt>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -296,6 +303,13 @@ pub enum Stmt {
         limit: Option<u64>,
     },
 
+    // ── History management ────────────────────────────────────────────────
+
+    /// PURGE HISTORY BEFORE "<timestamp>"
+    /// Deletes WAL records (and soft-deleted rows) older than the given timestamp.
+    /// Used for GDPR right-to-erasure and disk reclamation.
+    PurgeHistory { before: String },
+
     // ── Triggers ─────────────────────────────────────────────────────────
 
     /// TRIGGER <name> WHEN PUT|SET|DEL <table> DO <query>
@@ -324,6 +338,10 @@ pub enum Stmt {
         dst_table: String,
         filter: Option<Expr>,
         limit: Option<u64>,
+        /// Hop range for multi-hop traversal.
+        /// `None` = single hop (default).
+        /// `Some((min, max))` = BFS between min and max hops.
+        hops: Option<(usize, usize)>,
     },
 
     // ── REST API ──────────────────────────────────────────────────────────

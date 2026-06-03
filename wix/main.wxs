@@ -42,15 +42,16 @@
         <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1'/>
         <Property Id='DiskPrompt' Value='PulseDB Installation'/>
 
-        <Property Id='ARPHELPLINK' Value='https://fornexus.tech'/>
-        <Property Id='ARPURLINFOABOUT' Value='https://fornexus.tech'/>
-        <Property Id='ARPCONTACT' Value='pulsedb.license@gmail.com'/>
-        <Property Id='ARPCOMMENTS' Value='PulseDB is a high-performance embedded database engine with the PulseQL query language. Free 30-day production trial. Commercial licenses from $500/yr.'/>
+        <Property Id='ARPHELPLINK'       Value='https://fornexus.tech'/>
+        <Property Id='ARPURLINFOABOUT'   Value='https://fornexus.tech'/>
+        <Property Id='ARPCONTACT'        Value='pulsedb.license@gmail.com'/>
+        <Property Id='ARPCOMMENTS'       Value='PulseDB is a high-performance embedded database engine with the PulseQL query language. Free 30-day production trial. Commercial licenses from $500/yr.'/>
 
         <Directory Id='TARGETDIR' Name='SourceDir'>
             <Directory Id='$(var.PlatformProgramFilesFolder)' Name='PFiles'>
                 <Directory Id='APPLICATIONFOLDER' Name='PulseDB'>
 
+                    <!-- LICENSE file -->
                     <Component Id='License' Guid='B3F2A981-44DC-4E2B-9C3D-7A1B6E5F0D82'>
                         <File Id='LicenseFile'
                               Name='LICENSE'
@@ -59,14 +60,16 @@
                               KeyPath='yes'/>
                     </Component>
 
-                    <Component Id='Documentation' Guid='C4E3B092-55ED-4F3C-AD4E-8B2C7F6A1E93'>
-                        <File Id='DocFile'
-                              Name='PulseDB_Documentation.docx'
+                    <!-- .env.example for first-run configuration -->
+                    <Component Id='EnvExample' Guid='F1A2B3C4-D5E6-4F78-9A0B-C1D2E3F4A5B6'>
+                        <File Id='EnvExampleFile'
+                              Name='.env.example'
                               DiskId='1'
-                              Source='PulseDB_Documentation.docx'
+                              Source='.env.example'
                               KeyPath='yes'/>
                     </Component>
 
+                    <!-- Binaries -->
                     <Directory Id='Bin' Name='bin'>
                         <Component Id='Path' Guid='AD19F86C-CD1C-4DC2-BA1C-6D7DA5B1D5B0' KeyPath='yes'>
                             <Environment
@@ -102,7 +105,7 @@
         <Feature
             Id='Binaries'
             Title='PulseDB Application'
-            Description='Installs the PulseDB server, REPL, license, and documentation.'
+            Description='Installs pulsedb-server.exe, pulsedb-repl.exe, LICENSE, and .env.example.'
             Level='1'
             ConfigurableDirectory='APPLICATIONFOLDER'
             AllowAdvertise='no'
@@ -110,14 +113,14 @@
             Absent='disallow'>
 
             <ComponentRef Id='License'/>
-            <ComponentRef Id='Documentation'/>
+            <ComponentRef Id='EnvExample'/>
             <ComponentRef Id='binary0'/>
             <ComponentRef Id='binary1'/>
 
             <Feature
                 Id='Environment'
                 Title='Add to PATH'
-                Description='Add the PulseDB install folder to the PATH environment variable so pulsedb-server and pulsedb-repl can be called from any terminal.'
+                Description='Add C:\Program Files\PulseDB\bin to PATH so pulsedb-server and pulsedb-repl work from any terminal.'
                 Level='1'
                 Absent='allow'>
                 <ComponentRef Id='Path'/>

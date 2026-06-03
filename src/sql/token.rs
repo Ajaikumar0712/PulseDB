@@ -41,6 +41,10 @@ pub enum Token {
     Tables,      // SHOW TABLES
     Explain,     // EXPLAIN <query>
     Checkpoint,  // CHECKPOINT — flush all table data to disk
+    Purge,       // PURGE HISTORY BEFORE "<ts>"
+    History,     // HISTORY (part of PURGE HISTORY)
+    Before,      // BEFORE  (part of PURGE HISTORY)
+    In,          // IN (subquery: col IN (GET ...))
 
     // ── Streaming / vector / cluster keywords ──────────────────────────────
     Watch,       // WATCH — push-based query subscription

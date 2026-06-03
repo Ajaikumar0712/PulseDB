@@ -59,6 +59,10 @@ pub struct TablePermission {
     /// `None` means all tables.
     pub table: Option<String>,
     pub ops: HashSet<Op>,
+    /// Row-level security filter (PulseQL expression string).
+    /// When set, only rows where this expression is true are visible / writable.
+    /// Example: `"owner_id = 42"` restricts reads to rows owned by user 42.
+    pub row_filter: Option<String>,
 }
 
 // ── User ─────────────────────────────────────────────────────────────────
@@ -92,6 +96,19 @@ impl User {
     /// Verify a plain-text password against the stored Argon2 PHC hash.
     pub fn verify_password(&self, password: &str) -> bool {
         verify_argon2(&self.password_hash, password)
+    }
+
+    /// Return the row-level security filter expression for `op` on `table`, if any.
+    /// Returns `None` when there is no row filter (full access or admin).
+    pub fn row_filter(&self, op: &Op, table: &str) -> Option<String> {
+        if self.is_admin { return None; }
+        for perm in &self.permissions {
+            let table_match = perm.table.as_deref().map_or(true, |t| t == table);
+            if table_match && (perm.ops.contains(op) || perm.ops.contains(&Op::All)) {
+                return perm.row_filter.clone();
+            }
+        }
+        None
     }
 
     /// Check whether this user can perform `op` on `table`.
@@ -189,12 +206,25 @@ impl AuthManager {
 
     /// GRANT op ON table TO user — admin only.
     /// Pass `table = None` to grant on ALL tables.
+    /// GRANT op ON table TO user [WITH FILTER "<expr>"]
+    /// `row_filter` is a PulseQL WHERE expression string applied per-row.
     pub fn grant(
         &self,
         acting: &User,
         target_user: &str,
         op: Op,
         table: Option<String>,
+    ) -> Result<(), FlowError> {
+        self.grant_with_filter(acting, target_user, op, table, None)
+    }
+
+    pub fn grant_with_filter(
+        &self,
+        acting: &User,
+        target_user: &str,
+        op: Op,
+        table: Option<String>,
+        row_filter: Option<String>,
     ) -> Result<(), FlowError> {
         if !acting.is_admin {
             return Err(FlowError::auth("only admins can grant permissions"));
@@ -205,10 +235,11 @@ impl AuthManager {
         })?;
         if let Some(perm) = user.permissions.iter_mut().find(|p| p.table == table) {
             perm.ops.insert(op);
+            if row_filter.is_some() { perm.row_filter = row_filter; }
         } else {
             let mut ops = HashSet::new();
             ops.insert(op);
-            user.permissions.push(TablePermission { table, ops });
+            user.permissions.push(TablePermission { table, ops, row_filter });
         }
         Ok(())
     }

@@ -1,12 +1,30 @@
 {
   "name": "@pulsedb/client",
-  "version": "0.2.0",
-  "description": "JavaScript/Node.js client for PulseDB",
+  "version": "1.0.0",
+  "description": "JavaScript/Node.js client and ORM for PulseDB",
   "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./orm": "./orm.js"
+  },
+  "types": "index.d.ts",
   "license": "BUSL-1.1",
-  "keywords": ["pulsedb", "database", "client"],
+  "author": "Ajaikumar <pulsedb.license@gmail.com>",
+  "homepage": "https://fornexus.tech",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Ajaikumar0712/PulseDB"
+  },
+  "bugs": {
+    "url": "https://github.com/Ajaikumar0712/PulseDB/issues"
+  },
+  "keywords": ["pulsedb", "database", "client", "orm", "vector-search", "embedded", "nosql"],
   "engines": { "node": ">=14" },
+  "files": ["index.js", "orm.js", "orm.d.ts", "README.md"],
   "scripts": {
-    "test": "node test.js"
-  }
+    "test": "node test.js",
+    "prepublishOnly": "node -e \"require('./index.js'); require('./orm.js'); console.log('OK')\""
+  },
+  "dependencies": {},
+  "devDependencies": {}
 }

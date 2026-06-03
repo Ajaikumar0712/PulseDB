@@ -287,6 +287,10 @@ impl<'src> Lexer<'src> {
             "search"     => Token::Search,
             "version"    => Token::Version,
             "of"         => Token::Of,
+            "purge"      => Token::Purge,
+            "history"    => Token::History,
+            "before"     => Token::Before,
+            "in"         => Token::In,
             // Triggers
             "trigger" | "triggers" => Token::Trigger,
             "when"       => Token::When,
